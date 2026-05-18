@@ -116,7 +116,7 @@ def _scheduled_pacing_job(app):
     """Run pacing for every account — fires daily at 06:00 UTC."""
     with app.app_context():
         from database import Account, AccountSettings, GoogleOAuthToken, PacingRun
-        from routes.sheets import sync_budgets_for_account
+        from routes.sheets import sync_sheet_budgets_for_account
 
         accounts = Account.query.all()
         logger.info('Scheduled pacing: processing %d account(s)', len(accounts))
@@ -138,7 +138,7 @@ def _scheduled_pacing_job(app):
                 # Sheet sync first
                 if settings.google_sheet_id:
                     try:
-                        sync_budgets_for_account(account.id)
+                        sync_sheet_budgets_for_account(account.id)
                     except Exception as e:
                         logger.warning('Sheet sync failed for account %s: %s', account.id, e)
 
@@ -252,8 +252,8 @@ def _run_pacing_for_account(account, token, app):
     # Write spend back to sheet
     if settings and settings.google_sheet_id:
         try:
-            from routes.sheets import write_spend_for_account
-            write_spend_for_account(account.id)
+            from routes.sheets import write_sheet_spend_for_account
+            write_sheet_spend_for_account(account.id)
         except Exception as e:
             logger.warning('Scheduled sheet write failed for account %s: %s', account.id, e)
 

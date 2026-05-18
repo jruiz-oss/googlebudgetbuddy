@@ -83,7 +83,7 @@ export default function Settings() {
     try {
       await axios.put(`/api/settings/${id}`, { google_sheet_id: sheetId.trim() });
       const r = await axios.get(`/api/sheets/${id}/preview`);
-      setPreviewRows(r.data.preview || []);
+      setPreviewRows(r.data.preview || r.data.matches || []);
     } catch (e) {
       addToast(e.response?.data?.error || 'Preview failed', 'error');
     } finally {
@@ -146,13 +146,13 @@ export default function Settings() {
             {previewRows.length > 0 && (
               <table className="bb-table" style={{ width: '100%' }}>
                 <thead>
-                  <tr><th>Sheet Row</th><th>Matched Campaign</th><th>Budget</th><th>Match Type</th></tr>
+                  <tr><th>Sheet Row</th><th>Matched Campaigns</th><th>Budget</th><th>Match Type</th></tr>
                 </thead>
                 <tbody>
                   {previewRows.map((row, i) => (
                     <tr key={i}>
                       <td className="bb-muted">{row.sheet_name}</td>
-                      <td>{row.campaign_name || <span className="bb-muted">No match</span>}</td>
+                      <td>{row.campaign_name || row.matched_campaign_name || <span className="bb-muted">No match</span>}</td>
                       <td>{row.monthly_budget ? `$${row.monthly_budget}` : '—'}</td>
                       <td><span className="bb-muted" style={{ fontSize: '12px' }}>{row.match_type || '—'}</span></td>
                     </tr>

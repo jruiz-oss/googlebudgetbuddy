@@ -739,12 +739,12 @@ def sheet_config(account_id):
 @login_required
 def preview_matches(account_id):
     """
-    Open the current month's sheet tab and show which rows match DB campaigns.
+    Open the current month's sheet tab and show which Google Ads rows match DB campaigns.
 
     Returns:
       { sheet_tab, total_sheet_rows, matched, unmatched,
-        matches: [ { sheet_name, monthly_budget, mtd_spend, last_paced,
-                     row_index, matched_campaign_id, matched_campaign_name, match_type } ] }
+        preview: [ { sheet_name, monthly_budget, mtd_spend, row_index,
+                     matched_campaign_names, matched_campaign_count, match_type } ] }
     """
     if not _user_owns_account(account_id):
         return jsonify({"error": "Not found"}), 404
@@ -765,66 +765,9 @@ def preview_matches(account_id):
         logger.exception("Could not open Google Sheet for account %s", account_id)
         return jsonify({"error": "Could not open Google Sheet. Check the URL and that the service account has access."}), 400
 
-    sheet_rows = _get_meta_section(ws)
-    db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
     account = Account.query.get(account_id)
-    # Session 13 — shared workspace: prefix scoping considers every account
-    # in the DB, not just the originally-linked user's accounts.
-    all_user_accounts = Account.query.all()
-
-    matches = []
-    for row in sheet_rows:
-        scope = row.get("account_scope") or ""
-        if not _sheet_row_matches_account(scope, account):
-            matches.append({
-                "sheet_name": row["name"],
-                "account_scope": scope,
-                "monthly_budget": row["monthly_budget"],
-                "mtd_spend": row["mtd_spend"],
-                "last_paced": row["last_paced"],
-                "row_index": row["row_index"],
-                "matched_campaign_id": None,
-                "matched_campaign_name": None,
-                "match_type": "account_scope_mismatch",
-            })
-            continue
-        # When col D is a real text scope that explicitly names this account, trust it
-        # and skip the prefix check.  See _scope_is_explicit_match for rationale.
-        if not _scope_is_explicit_match(scope, account) and not _row_prefix_matches_account(row["name"], account, all_user_accounts):
-            matches.append({
-                "sheet_name": row["name"],
-                "account_scope": scope,
-                "monthly_budget": row["monthly_budget"],
-                "mtd_spend": row["mtd_spend"],
-                "last_paced": row["last_paced"],
-                "row_index": row["row_index"],
-                "matched_campaign_id": None,
-                "matched_campaign_name": None,
-                "match_type": "account_scope_mismatch",
-            })
-            continue
-        match_name = _strip_account_prefix(row["name"], account, all_user_accounts)
-        campaign = _match_campaign(match_name, db_campaigns)
-        matches.append({
-            "sheet_name": row["name"],
-            "account_scope": scope,
-            "monthly_budget": row["monthly_budget"],
-            "mtd_spend": row["mtd_spend"],
-            "last_paced": row["last_paced"],
-            "row_index": row["row_index"],
-            "matched_campaign_id": campaign.id if campaign else None,
-            "matched_campaign_name": campaign.campaign_name if campaign else None,
-            "match_type": _match_type_label(match_name, campaign),
-        })
-
-    bad_types = {"none", "account_scope_mismatch"}
-    return jsonify({
-        "sheet_tab": tab_name,
-        "total_sheet_rows": len(sheet_rows),
-        "matched": sum(1 for m in matches if m["match_type"] not in bad_types),
-        "unmatched": sum(1 for m in matches if m["match_type"] in bad_types),
-        "matches": matches,
-    }), 200
+    result = preview_google_ads_rows_for_account(account, ws, tab_name)
+    return jsonify(result), 200
 
 
 def sync_budgets_for_account(account_id):
@@ -1043,7 +986,7 @@ def sync_budgets(account_id):
         return jsonify({"error": "Not found"}), 404
 
     try:
-        result = sync_budgets_for_account(account_id)
+        result = sync_sheet_budgets_for_account(account_id)
     except (ValueError, RuntimeError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception:
@@ -1051,7 +994,7 @@ def sync_budgets(account_id):
         return jsonify({"error": "Could not open Google Sheet. Check the URL and that the service account has access."}), 400
 
     msg_parts = [f"Synced budgets for {result['updated_count']} campaign(s)"]
-    if result["allocations_updated_count"]:
+    if result.get("allocations_updated_count"):
         msg_parts.append(f"and allocations for {result['allocations_updated_count']} ad set(s)")
     msg_parts.append(f"from '{result['sheet_tab']}'")
 
@@ -1254,7 +1197,7 @@ def write_spend(account_id):
         return jsonify({"error": "Not found"}), 404
 
     try:
-        result = write_spend_for_account(account_id)
+        result = write_sheet_spend_for_account(account_id)
     except (ValueError, RuntimeError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception:
@@ -1341,6 +1284,70 @@ def _get_google_ads_section(worksheet, account_name: str) -> list:
     return rows
 
 
+def preview_google_ads_rows_for_account(account: Account, worksheet, tab_name: str) -> dict:
+    """Preview how Google Ads sheet rows map onto this account's tracked campaigns."""
+    sheet_rows = _get_google_ads_section(worksheet, account.account_name)
+    db_campaigns = Campaign.query.filter_by(account_id=account.id, is_active=True).all()
+    named_filters = [
+        row["campaign_filter"].strip().lower()
+        for row in sheet_rows
+        if row["campaign_filter"].strip()
+    ]
+
+    preview_rows = []
+    for row in sheet_rows:
+        cf = row["campaign_filter"].strip().lower()
+        label = row["campaign_filter"].strip() or "Primary"
+
+        if cf:
+            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
+            match_type = "segment_filter"
+        else:
+            matched = [
+                c for c in db_campaigns
+                if not any(f in c.campaign_name.lower() for f in named_filters)
+            ]
+            match_type = "primary_catch_all"
+
+        matched_names = [c.campaign_name for c in matched]
+        joined_names = ", ".join(matched_names)
+        if not matched_names:
+            match_type = "no_campaigns_matched"
+
+        preview_rows.append({
+            "sheet_name": label,
+            "account_name": row["account_name"],
+            "campaign_filter": row["campaign_filter"],
+            "monthly_budget": row["monthly_budget"],
+            "mtd_spend": row["mtd_spend"],
+            "row_index": row["row_index"],
+            "matched_campaign_name": joined_names or None,
+            "matched_campaign_names": matched_names,
+            "matched_campaign_count": len(matched_names),
+            "campaign_name": joined_names or None,
+            "match_type": match_type,
+        })
+
+    return {
+        "sheet_tab": tab_name,
+        "total_sheet_rows": len(sheet_rows),
+        "matched": sum(1 for row in preview_rows if row["matched_campaign_count"] > 0),
+        "unmatched": sum(1 for row in preview_rows if row["matched_campaign_count"] == 0),
+        "preview": preview_rows,
+        "matches": preview_rows,
+    }
+
+
+def sync_sheet_budgets_for_account(account_id: int) -> dict:
+    """Primary budget-sync entry point for Google BudgetBuddy."""
+    return sync_google_ads_budgets_for_account(account_id)
+
+
+def write_sheet_spend_for_account(account_id: int) -> dict:
+    """Primary spend writeback entry point for Google BudgetBuddy."""
+    return write_google_ads_spend_for_account(account_id)
+
+
 def sync_google_ads_budgets_for_account(account_id: int) -> dict:
     """Read the Google Ads section of the sheet and update campaign budgets + labels.
 
@@ -1370,7 +1377,10 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
         return {
             "sheet_tab": tab_name,
             "message": f"No rows found for account '{account.account_name}' in the Google Ads section.",
-            "updated": [], "skipped": [],
+            "updated_count": 0,
+            "skipped_count": 0,
+            "updated": [],
+            "skipped": [],
         }
 
     db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
@@ -1517,7 +1527,7 @@ def sync_google_ads(account_id):
     if not _user_owns_account(account_id):
         return jsonify({"error": "Not found"}), 404
     try:
-        result = sync_google_ads_budgets_for_account(account_id)
+        result = sync_sheet_budgets_for_account(account_id)
     except (ValueError, RuntimeError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception:
@@ -1536,7 +1546,7 @@ def write_google_ads_spend(account_id):
     if not _user_owns_account(account_id):
         return jsonify({"error": "Not found"}), 404
     try:
-        result = write_google_ads_spend_for_account(account_id)
+        result = write_sheet_spend_for_account(account_id)
     except (ValueError, RuntimeError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception:

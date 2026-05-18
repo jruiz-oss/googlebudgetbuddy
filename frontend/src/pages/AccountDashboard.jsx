@@ -105,6 +105,7 @@ export default function AccountDashboard() {
   const [selected, setSelected] = useState(new Set());
   const [showImport, setShowImport] = useState(false);
   const [sheetSync, setSheetSync] = useState(null);
+  const [sheetWrite, setSheetWrite] = useState(null);
   const [pauseWarning, setPauseWarning] = useState(null);
 
   const load = useCallback(async () => {
@@ -125,28 +126,61 @@ export default function AccountDashboard() {
 
   useEffect(() => { load(); }, [load]);
 
+  const mergeRecommendationsIntoCampaigns = (nextRecommendations) => {
+    const byCampaignId = new Map((nextRecommendations || []).map(rec => [rec.campaign_id, rec]));
+    setCampaigns(prev => prev.map(c => {
+      const rec = byCampaignId.get(c.id);
+      if (!rec) return c;
+      return {
+        ...c,
+        monthly_budget: rec.monthly_budget ?? c.monthly_budget,
+        latest_pacing: {
+          ...(c.latest_pacing || {}),
+          actual_spend: rec.actual_spend,
+          expected_spend: rec.expected_spend,
+          pace_ratio: rec.pace_ratio,
+          current_daily_budget: rec.current_daily_budget,
+          recommended_daily_budget: rec.recommended_daily_budget,
+          change_percent: rec.change_percent,
+          status: rec.status,
+          clicks: rec.clicks,
+          conversions: rec.conversions,
+          cpc: rec.cpc,
+        },
+      };
+    }));
+  };
+
   const runPacing = async () => {
     setRunning(true);
     setRecommendations([]);
     setSummary(null);
     setSheetSync(null);
+    setSheetWrite(null);
     setPauseWarning(null);
     try {
       const r = await axios.post(`/api/pacing/${id}/run`);
-      setRecommendations(r.data.recommendations || []);
+      const nextRecommendations = r.data.recommendations || [];
+      setRecommendations(nextRecommendations);
       setSummary(r.data.summary);
       setSheetSync(r.data.sheet_sync);
+      setSheetWrite(r.data.sheet_write);
       setPauseWarning(r.data.auto_pause_warning);
+      mergeRecommendationsIntoCampaigns(nextRecommendations);
       // Pre-select all non-on-pace campaigns
       const toSelect = new Set(
-        (r.data.recommendations || [])
+        nextRecommendations
           .filter(rec => rec.status !== 'ON_PACE')
           .map(rec => rec.campaign_id)
       );
       setSelected(toSelect);
       if (r.data.sheet_sync && !r.data.sheet_sync.error) {
-        const { budgets_updated = 0 } = r.data.sheet_sync;
-        if (budgets_updated > 0) addToast(`Pulled ${budgets_updated} budget(s) from Google Sheet`, 'info');
+        const budgetsUpdated = r.data.sheet_sync.updated_count || r.data.sheet_sync.budgets_updated || 0;
+        if (budgetsUpdated > 0) addToast(`Pulled ${budgetsUpdated} budget(s) from Google Sheet`, 'info');
+      }
+      if (r.data.sheet_write && !r.data.sheet_write.error) {
+        const spendRowsWritten = r.data.sheet_write.written_count || 0;
+        if (spendRowsWritten > 0) addToast(`Wrote spend to ${spendRowsWritten} Google Sheet row(s)`, 'info');
       }
       addToast('Pacing run complete', 'success');
     } catch (e) {
@@ -181,12 +215,15 @@ export default function AccountDashboard() {
       // 3. Run pacing immediately
       setSetupStatus('Running pacing…');
       const pacingR = await axios.post(`/api/pacing/${id}/run`);
-      setRecommendations(pacingR.data.recommendations || []);
+      const nextRecommendations = pacingR.data.recommendations || [];
+      setRecommendations(nextRecommendations);
       setSummary(pacingR.data.summary);
       setSheetSync(pacingR.data.sheet_sync);
+      setSheetWrite(pacingR.data.sheet_write);
       setPauseWarning(pacingR.data.auto_pause_warning);
+      mergeRecommendationsIntoCampaigns(nextRecommendations);
       const toSelect = new Set(
-        (pacingR.data.recommendations || [])
+        nextRecommendations
           .filter(rec => rec.status !== 'ON_PACE')
           .map(rec => rec.campaign_id)
       );
@@ -292,6 +329,12 @@ export default function AccountDashboard() {
       {sheetSync?.error && (
         <div className="bb-alert bb-alert-warn" style={{ marginBottom: '16px' }}>
           Sheet sync warning: {sheetSync.error}
+        </div>
+      )}
+
+      {sheetWrite?.error && (
+        <div className="bb-alert bb-alert-warn" style={{ marginBottom: '16px' }}>
+          Sheet writeback warning: {sheetWrite.error}
         </div>
       )}
 

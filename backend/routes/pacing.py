@@ -120,10 +120,11 @@ def run_pacing(account_id):
 
     # 1. Pull budgets from Google Sheet (if configured) — sheet is source of truth
     sheet_sync = None
+    sheet_write = None
     if settings.google_sheet_id:
         try:
-            from routes.sheets import sync_budgets_for_account
-            sheet_sync = sync_budgets_for_account(account_id)
+            from routes.sheets import sync_sheet_budgets_for_account
+            sheet_sync = sync_sheet_budgets_for_account(account_id)
             db.session.expire_all()  # Reload campaigns after budget sync
             account = Account.query.options(
                 selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
@@ -230,6 +231,14 @@ def run_pacing(account_id):
 
     db.session.commit()
 
+    if settings.google_sheet_id:
+        try:
+            from routes.sheets import write_sheet_spend_for_account
+            sheet_write = write_sheet_spend_for_account(account_id)
+        except Exception as e:
+            logger.warning('Sheet writeback failed for account %s: %s', account_id, e)
+            sheet_write = {'error': str(e)}
+
     summary = {
         'total': len(recommendations),
         'increase': sum(1 for r in recommendations if r['status'] == 'INCREASE'),
@@ -263,6 +272,7 @@ def run_pacing(account_id):
         'recommendations': recommendations,
         'summary': summary,
         'sheet_sync': sheet_sync,
+        'sheet_write': sheet_write,
         'auto_pause_warning': auto_pause_triggered,
     })
 
