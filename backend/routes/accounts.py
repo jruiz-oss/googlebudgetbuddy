@@ -147,6 +147,17 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
         logger.warning('Campaign sync failed for account %s (%s): %s', account.id, account.google_customer_id, e)
         return 0, 0
 
+    live_ids = {str(lc['campaign_id']) for lc in live}
+
+    # Mark any DB campaigns no longer returned by the API as inactive
+    stale = Campaign.query.filter_by(account_id=account.id, is_active=True).filter(
+        ~Campaign.google_campaign_id.in_(live_ids)
+    ).all() if live_ids else []
+    deactivated = 0
+    for c in stale:
+        c.is_active = False
+        deactivated += 1
+
     added = updated = 0
     for lc in live:
         cid = str(lc['campaign_id'])
@@ -202,6 +213,7 @@ def sync_from_mcc():
 
     # Build a lookup: customer_id (no dashes) → real name
     live_by_id = {a['customer_id'].replace('-', ''): a['name'] for a in live_accounts}
+    logger.info('MCC sync start: %d live accounts found in MCC', len(live_accounts))
 
     db_accounts = Account.query.all()
 
@@ -274,6 +286,16 @@ def sync_from_mcc():
 
         # Write to DB (single-threaded to avoid SQLAlchemy session conflicts)
         for acct_id, live in live_by_account.items():
+            live_ids = {str(lc['campaign_id']) for lc in live}
+
+            # Deactivate DB campaigns not returned by the API (removed/ended)
+            if live_ids:
+                stale = Campaign.query.filter_by(account_id=acct_id, is_active=True).filter(
+                    ~Campaign.google_campaign_id.in_(live_ids)
+                ).all()
+                for c in stale:
+                    c.is_active = False
+
             for lc in live:
                 cid = str(lc['campaign_id'])
                 existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
@@ -293,19 +315,70 @@ def sync_from_mcc():
                     ))
                     campaigns_added += 1
 
+    logger.info(
+        'MCC sync campaigns: %d added, %d updated across %d accounts',
+        campaigns_added, campaigns_updated, len(kept_accounts),
+    )
     if campaigns_added or campaigns_updated:
         db.session.commit()
 
+    # Sync sheet budgets for all surviving accounts that have a Google Sheet configured.
+    # This runs after the campaign upsert so monthly_budget is populated immediately
+    # rather than requiring a separate pacing run.
+    # IMPORTANT: re-query account IDs fresh from DB — the kept_accounts ORM objects
+    # may be expired/detached after the db.session.commit() above, causing lazy-load
+    # of account.settings to silently return None and skip every account.
+    sheet_synced = 0
+    sheet_sync_errors = []
+    kept_account_ids = [a.id for a in kept_accounts]
+    if kept_account_ids:
+        try:
+            from routes.sheets import sync_sheet_budgets_for_account
+            # Fresh query — not affected by the prior commit's session expiry
+            accounts_with_sheets = (
+                Account.query
+                .join(AccountSettings, Account.id == AccountSettings.account_id)
+                .filter(
+                    Account.id.in_(kept_account_ids),
+                    AccountSettings.google_sheet_id.isnot(None),
+                    AccountSettings.google_sheet_id != '',
+                )
+                .all()
+            )
+            logger.info(
+                'MCC sync sheet step: %d/%d accounts have a sheet configured',
+                len(accounts_with_sheets), len(kept_account_ids),
+            )
+            for account in accounts_with_sheets:
+                try:
+                    logger.info('MCC sync: syncing sheet budgets for account %s (%s)', account.id, account.account_name)
+                    sync_sheet_budgets_for_account(account.id)
+                    sheet_synced += 1
+                except Exception as e:
+                    logger.warning(
+                        'Sheet budget sync failed for account %s during MCC sync: %s',
+                        account.id, e,
+                    )
+                    sheet_sync_errors.append({'account_id': account.id, 'error': str(e)})
+        except Exception as e:
+            logger.warning('Sheet sync step skipped during MCC sync: %s', e)
+
+    msg_parts = [
+        f'Updated {len(updated)} name(s), removed {len(deleted)} account(s).',
+        f'Campaigns: {campaigns_added} added, {campaigns_updated} updated.',
+    ]
+    if sheet_synced:
+        msg_parts.append(f'Budgets synced from sheet for {sheet_synced} account(s).')
+
     return jsonify({
-        'message': (
-            f'Updated {len(updated)} name(s), removed {len(deleted)} account(s). '
-            f'Campaigns: {campaigns_added} added, {campaigns_updated} updated.'
-        ),
+        'message': ' '.join(msg_parts),
         'updated': updated,
         'deleted': deleted,
         'live_account_count': len(live_accounts),
         'campaigns_added': campaigns_added,
         'campaigns_updated': campaigns_updated,
+        'sheet_synced': sheet_synced,
+        'sheet_sync_errors': sheet_sync_errors,
     }), 200
 
 

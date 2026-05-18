@@ -24,7 +24,7 @@ def get_campaigns(account_id):
     campaigns = (
         Campaign.query
         .options(selectinload(Campaign.pacing_data))
-        .filter_by(account_id=account_id)
+        .filter_by(account_id=account_id, is_active=True)
         .order_by(Campaign.campaign_name)
         .all()
     )
