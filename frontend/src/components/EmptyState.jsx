@@ -10,12 +10,12 @@
  */
 import React from 'react';
 
-export function EmptyState({ icon: Icon, title, body, action, secondary }) {
+export function EmptyState({ icon, title, body, action, secondary }) {
   return (
     <div className="bb-empty">
-      {Icon && (
+      {icon && (
         <div className="bb-empty-icon" aria-hidden="true">
-          <Icon size={28} strokeWidth={1.75} />
+          {icon}
         </div>
       )}
       <div className="bb-empty-title">{title}</div>
@@ -47,3 +47,5 @@ export function EmptyState({ icon: Icon, title, body, action, secondary }) {
     </div>
   );
 }
+
+export default EmptyState;
