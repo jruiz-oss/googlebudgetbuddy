@@ -149,6 +149,7 @@ def run_pacing(account_id):
             logger.warning('Sheet sync failed for account %s: %s', account_id, e)
             sheet_sync = {'error': str(e)}
     else:
+        sheet_sync = {'warning': 'Google Sheet not configured for this account.'}
         logger.warning(
             "Run pacing skipping sheet sync: account_id=%s account_name=%r reason=%r",
             account.id,

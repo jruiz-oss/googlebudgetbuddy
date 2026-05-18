@@ -177,6 +177,7 @@ export default function AccountDashboard() {
       if (r.data.sheet_sync && !r.data.sheet_sync.error) {
         const budgetsUpdated = r.data.sheet_sync.updated_count || r.data.sheet_sync.budgets_updated || 0;
         if (budgetsUpdated > 0) addToast(`Pulled ${budgetsUpdated} budget(s) from Google Sheet`, 'info');
+        if (r.data.sheet_sync.warning) addToast(r.data.sheet_sync.warning, 'warn');
       }
       if (r.data.sheet_write && !r.data.sheet_write.error) {
         const spendRowsWritten = r.data.sheet_write.written_count || 0;
@@ -222,6 +223,7 @@ export default function AccountDashboard() {
       setSheetWrite(pacingR.data.sheet_write);
       setPauseWarning(pacingR.data.auto_pause_warning);
       mergeRecommendationsIntoCampaigns(nextRecommendations);
+      if (pacingR.data.sheet_sync?.warning) addToast(pacingR.data.sheet_sync.warning, 'warn');
       const toSelect = new Set(
         nextRecommendations
           .filter(rec => rec.status !== 'ON_PACE')
@@ -275,6 +277,7 @@ export default function AccountDashboard() {
   const totalBudget = activeCampaigns.reduce((s, c) => s + (c.monthly_budget || 0), 0);
   const totalSpend = activeCampaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
   const spendPct = totalBudget > 0 ? (totalSpend / totalBudget * 100) : 0;
+  const hasSheetId = Boolean(account?.settings?.google_sheet_id);
 
   if (loading) return <div><SkeletonTable /></div>;
   if (!account) return <div className="bb-alert bb-alert-error">Account not found</div>;
@@ -325,10 +328,22 @@ export default function AccountDashboard() {
         </div>
       )}
 
+      {!hasSheetId && (
+        <div className="bb-alert bb-alert-warn" style={{ marginBottom: '16px' }}>
+          <strong>Google Sheet not configured:</strong> budgets will stay at $0 until you add a Sheet ID in Settings.
+        </div>
+      )}
+
       {/* Sheet sync result */}
       {sheetSync?.error && (
         <div className="bb-alert bb-alert-warn" style={{ marginBottom: '16px' }}>
           Sheet sync warning: {sheetSync.error}
+        </div>
+      )}
+
+      {sheetSync?.warning && (
+        <div className="bb-alert bb-alert-warn" style={{ marginBottom: '16px' }}>
+          Sheet sync warning: {sheetSync.warning}
         </div>
       )}
 

@@ -30,10 +30,12 @@ Optional:
 
 import logging
 import os
+import atexit
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import sqlalchemy
 
 from database import db
 
@@ -42,6 +44,47 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(name)s — %(message)s',
 )
 logger = logging.getLogger(__name__)
+_scheduler_lock_conn = None
+
+
+def _acquire_postgres_advisory_lock(lock_id: int, keep_open: bool = False):
+    """Try to acquire a Postgres advisory lock.
+
+    When keep_open=True, keeps the connection alive for the lifetime of the
+    process so the advisory lock remains held.
+    """
+    global _scheduler_lock_conn
+
+    database_url = os.environ.get('DATABASE_URL', '')
+    if 'postgresql' not in database_url:
+        return None, True
+
+    conn = db.engine.connect()
+    acquired = bool(conn.execute(
+        sqlalchemy.text('SELECT pg_try_advisory_lock(:lock_id)'),
+        {'lock_id': lock_id},
+    ).scalar())
+
+    if acquired:
+        if not keep_open:
+            return conn, True
+
+        _scheduler_lock_conn = conn
+
+        def _close_lock_conn():
+            global _scheduler_lock_conn
+            if _scheduler_lock_conn is not None:
+                try:
+                    _scheduler_lock_conn.close()
+                except Exception:
+                    pass
+                _scheduler_lock_conn = None
+
+        atexit.register(_close_lock_conn)
+        return conn, True
+
+    conn.close()
+    return None, False
 
 
 def create_app():
@@ -95,14 +138,15 @@ def create_app():
     # ── Create tables ─────────────────────────────────────────────────────────
     if not os.environ.get('SKIP_CREATE_ALL'):
         with app.app_context():
-            import sqlalchemy
             try:
-                with db.engine.connect() as conn:
-                    conn.execute(sqlalchemy.text(
-                        'SELECT pg_try_advisory_lock(9876543210)'
-                    ))
-                db.create_all()
-                logger.info('db.create_all() completed')
+                lock_conn, acquired = _acquire_postgres_advisory_lock(9876543210)
+                if acquired:
+                    db.create_all()
+                    logger.info('db.create_all() completed')
+                    if lock_conn is not None:
+                        lock_conn.close()
+                else:
+                    logger.info('db.create_all() skipped — advisory lock held by another worker')
             except Exception as e:
                 logger.warning('db.create_all() skipped (SQLite or lock held): %s', e)
                 db.create_all()
@@ -292,18 +336,28 @@ def cron_run_all():
 # ── Start scheduler ────────────────────────────────────────────────────────────
 
 if os.environ.get('FLASK_ENV') == 'production' and not os.environ.get('DISABLE_SCHEDULER'):
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(
-        _scheduled_pacing_job,
-        'cron',
-        hour=6,
-        minute=0,
-        args=[app],
-        id='daily_pacing',
-        replace_existing=True,
-    )
-    scheduler.start()
-    logger.info('APScheduler started — daily pacing at 06:00 UTC')
+    with app.app_context():
+        try:
+            _lock_conn, acquired = _acquire_postgres_advisory_lock(9876543211, keep_open=True)
+        except Exception as e:
+            logger.warning('APScheduler lock check failed; starting scheduler anyway: %s', e)
+            acquired = True
+
+    if acquired:
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(
+            _scheduled_pacing_job,
+            'cron',
+            hour=6,
+            minute=0,
+            args=[app],
+            id='daily_pacing',
+            replace_existing=True,
+        )
+        scheduler.start()
+        logger.info('APScheduler started — daily pacing at 06:00 UTC')
+    else:
+        logger.info('APScheduler not started in this worker — advisory lock held by another worker')
 
 
 if __name__ == '__main__':
