@@ -1373,7 +1373,21 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
     ws, tab_name = _open_month_worksheet(spreadsheet)
     sheet_rows = _get_google_ads_section(ws, account.account_name)
 
+    logger.info(
+        "Google Ads sync start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d",
+        account.id,
+        account.account_name,
+        tab_name,
+        len(sheet_rows),
+    )
+
     if not sheet_rows:
+        logger.warning(
+            "Google Ads sync found no matching sheet rows: account_id=%s account_name=%r sheet_tab=%r",
+            account.id,
+            account.account_name,
+            tab_name,
+        )
         return {
             "sheet_tab": tab_name,
             "message": f"No rows found for account '{account.account_name}' in the Google Ads section.",
@@ -1384,6 +1398,11 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
         }
 
     db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+    logger.info(
+        "Google Ads sync campaigns loaded: account_id=%s active_campaigns=%d",
+        account.id,
+        len(db_campaigns),
+    )
 
     # Collect all named filter keywords so we can identify the "Primary" segment
     named_filters = [
@@ -1400,6 +1419,13 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
         label = row["campaign_filter"].strip() or "Primary"
         budget = row["monthly_budget"]
         if budget is None:
+            logger.info(
+                "Google Ads sync skipped row: account_id=%s row=%s label=%r reason=%r",
+                account.id,
+                row["row_index"],
+                label,
+                "No budget value in col C",
+            )
             skipped.append({"label": label, "reason": "No budget value in col C"})
             continue
 
@@ -1413,7 +1439,25 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
                 if not any(f in c.campaign_name.lower() for f in named_filters)
             ]
 
+        logger.info(
+            "Google Ads sync row match: account_id=%s row=%s label=%r filter=%r budget=%s matched_count=%d matched_campaigns=%s",
+            account.id,
+            row["row_index"],
+            label,
+            row["campaign_filter"],
+            budget,
+            len(matched),
+            [c.campaign_name for c in matched],
+        )
+
         if not matched:
+            logger.info(
+                "Google Ads sync skipped row: account_id=%s row=%s label=%r reason=%r",
+                account.id,
+                row["row_index"],
+                label,
+                "No campaigns matched the filter keyword",
+            )
             skipped.append({"label": label, "reason": "No campaigns matched the filter keyword"})
             continue
 
@@ -1432,6 +1476,12 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
             })
 
     db.session.commit()
+    logger.info(
+        "Google Ads sync complete: account_id=%s updated=%d skipped=%d",
+        account.id,
+        len(updated),
+        len(skipped),
+    )
     return {
         "sheet_tab": tab_name,
         "updated_count": len(updated),
@@ -1460,6 +1510,14 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
     sheet_rows = _get_google_ads_section(ws, account.account_name)
 
     db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+    logger.info(
+        "Google Ads spend write start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d active_campaigns=%d",
+        account.id,
+        account.account_name,
+        tab_name,
+        len(sheet_rows),
+        len(db_campaigns),
+    )
     named_filters = [
         r["campaign_filter"].lower()
         for r in sheet_rows
@@ -1482,7 +1540,24 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
                 if not any(f in c.campaign_name.lower() for f in named_filters)
             ]
 
+        logger.info(
+            "Google Ads spend row match: account_id=%s row=%s label=%r filter=%r matched_count=%d matched_campaigns=%s",
+            account.id,
+            row["row_index"],
+            label,
+            row["campaign_filter"],
+            len(matched),
+            [c.campaign_name for c in matched],
+        )
+
         if not matched:
+            logger.info(
+                "Google Ads spend skipped row: account_id=%s row=%s label=%r reason=%r",
+                account.id,
+                row["row_index"],
+                label,
+                "No matching campaigns",
+            )
             skipped.append({"label": label, "reason": "No matching campaigns"})
             continue
 
@@ -1501,6 +1576,13 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
                 have_data = True
 
         if not have_data:
+            logger.info(
+                "Google Ads spend skipped row: account_id=%s row=%s label=%r reason=%r",
+                account.id,
+                row["row_index"],
+                label,
+                "No pacing data yet — run pacing first",
+            )
             skipped.append({"label": label, "reason": "No pacing data yet — run pacing first"})
             continue
 
@@ -1511,6 +1593,12 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
     if cell_updates:
         _sheets_retry(ws.batch_update, cell_updates, value_input_option="USER_ENTERED")
 
+    logger.info(
+        "Google Ads spend write complete: account_id=%s written=%d skipped=%d",
+        account.id,
+        len(written),
+        len(skipped),
+    )
     return {
         "sheet_tab": tab_name,
         "written_count": len(written),
