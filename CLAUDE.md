@@ -77,6 +77,7 @@ frontend/src/
 | `FRONTEND_URL`              | Public frontend URL (used for CORS + redirects)  |
 | `SMTP_*`                    | Optional — for daily digest emails               |
 | `CRON_SECRET`               | Optional — protects POST /api/cron/run-all-accounts |
+| `WEBHOOK_API_KEY`           | Must match `WEBHOOK_API_KEY` in the MCC script — authenticates inbound webhook calls |
 
 ---
 

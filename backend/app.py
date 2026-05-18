@@ -81,9 +81,10 @@ def create_app():
     from routes.history import history_bp
     from routes.sheets import sheets_bp
     from routes.leads import leads_bp
+    from routes.webhook import webhook_bp
 
     for bp in [auth_bp, oauth_bp, accounts_bp, campaigns_bp,
-               pacing_bp, settings_bp, history_bp, sheets_bp, leads_bp]:
+               pacing_bp, settings_bp, history_bp, sheets_bp, leads_bp, webhook_bp]:
         app.register_blueprint(bp)
 
     # ── Health check ──────────────────────────────────────────────────────────

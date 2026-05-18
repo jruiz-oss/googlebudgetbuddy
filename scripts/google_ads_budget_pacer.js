@@ -23,8 +23,9 @@
 // =============================================================================
 var SPREADSHEET_ID = "1qCkWlqT21K1tHtSYmN3HPGKBKZLSQ84qmpDIC8O3VYA";
 var SHEET_NAME = "May 2026";
-var WEBHOOK_URL = "https://dksqlsguueaxnrkkvnyz.supabase.co/functions/v1/google-ads-webhook";
-var WEBHOOK_API_KEY = "Commit-Vault-2026-XyZ7";
+// ↓ Updated: points to BudgetBuddy instead of the old Supabase endpoint
+var WEBHOOK_URL = "https://YOUR-RAILWAY-URL.railway.app/api/webhook/google-ads";
+var WEBHOOK_API_KEY = "YOUR-WEBHOOK-API-KEY"; // Must match WEBHOOK_API_KEY env var in Railway
 var EMAIL_ADDRESS = "jruiz@commitagency.com";
 var SEND_EMAIL_NOTIFICATIONS = true;
 var BUDGET_THRESHOLD = 1.0; // 100% Budget Utilization Cap
