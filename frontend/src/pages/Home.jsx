@@ -22,23 +22,20 @@ function AddAccountModal({ onClose, onAdded }) {
   const [mccId, setMccId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const { addToast } = useToast();
 
   const submit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const r = await axios.post('/api/accounts', {
+      await axios.post('/api/accounts', {
         account_name: name,
         google_customer_id: customerId.replace(/-/g, ''),
         mcc_customer_id: mccId.replace(/-/g, '') || null,
       });
-      addToast(`Account "${name}" added`, 'success');
-      onAdded(r.data.account);
+      onAdded();
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to add account');
-    } finally {
       setLoading(false);
     }
   };
@@ -235,7 +232,7 @@ export default function Home() {
       {showAdd && (
         <AddAccountModal
           onClose={() => setShowAdd(false)}
-          onAdded={(acct) => { setShowAdd(false); load(); }}
+          onAdded={() => { setShowAdd(false); load(); addToast('Account added', 'success'); }}
         />
       )}
     </div>
