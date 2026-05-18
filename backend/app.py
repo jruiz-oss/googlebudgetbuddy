@@ -203,18 +203,22 @@ def _run_pacing_for_account(account, token, app):
         PacingData, PacingRun, db,
     )
     from google_ads_client import get_campaign_mtd_spend, GoogleAdsError
-    from routes.pacing import _month_bounds, _compute_recommendation, _campaign_is_active_today
+    from routes.pacing import (
+        _month_bounds, _compute_recommendation,
+        _campaign_is_active_today, _effective_mcc_customer_id,
+    )
 
     today = datetime.utcnow().date()
     month_start, _ = _month_bounds(today)
     settings = account.settings
+    effective_mcc_id = _effective_mcc_customer_id(account)
 
     logger.info(
         "Scheduled pacing start: account_id=%s account_name=%r customer_id=%r mcc_id=%r has_sheet_id=%s",
         account.id,
         account.account_name,
         account.google_customer_id,
-        account.mcc_customer_id,
+        effective_mcc_id,
         bool(settings and (settings.google_sheet_id or "").strip()),
     )
 
@@ -234,7 +238,7 @@ def _run_pacing_for_account(account, token, app):
             account.google_customer_id,
             campaign_ids,
             month_start,
-            mcc_customer_id=account.mcc_customer_id,
+            mcc_customer_id=effective_mcc_id,
         )
     except GoogleAdsError as e:
         logger.error(
@@ -242,7 +246,7 @@ def _run_pacing_for_account(account, token, app):
             account.id,
             account.account_name,
             account.google_customer_id,
-            account.mcc_customer_id,
+            effective_mcc_id,
             e,
         )
         run = PacingRun(

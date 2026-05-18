@@ -18,6 +18,7 @@ Before computing pacing, we sync budgets from the sheet (if configured).
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request, session
@@ -88,6 +89,11 @@ def _campaign_is_active_today(campaign, today):
     return False
 
 
+def _effective_mcc_customer_id(account):
+    """Use the account-specific MCC when present, otherwise fall back to env."""
+    return (account.mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '').strip() or None
+
+
 # ---------------------------------------------------------------------------
 # /run — dry run, returns recommendations without touching Google Ads
 # ---------------------------------------------------------------------------
@@ -114,13 +120,14 @@ def run_pacing(account_id):
         settings = AccountSettings(account_id=account.id)
         db.session.add(settings)
         db.session.commit()
+    effective_mcc_id = _effective_mcc_customer_id(account)
 
     logger.info(
         "Run pacing start: account_id=%s account_name=%r customer_id=%r mcc_id=%r has_sheet_id=%s",
         account.id,
         account.account_name,
         account.google_customer_id,
-        account.mcc_customer_id,
+        effective_mcc_id,
         bool((settings.google_sheet_id or "").strip()),
     )
 
@@ -145,6 +152,7 @@ def run_pacing(account_id):
                 selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
                 selectinload(Account.settings),
             ).get(account_id)
+            effective_mcc_id = _effective_mcc_customer_id(account)
         except Exception as e:
             logger.warning('Sheet sync failed for account %s: %s', account_id, e)
             sheet_sync = {'error': str(e)}
@@ -180,7 +188,7 @@ def run_pacing(account_id):
         account.id,
         len(campaign_ids),
         account.google_customer_id,
-        account.mcc_customer_id,
+        effective_mcc_id,
     )
     try:
         metrics_by_id = get_campaign_mtd_spend(
@@ -188,7 +196,7 @@ def run_pacing(account_id):
             account.google_customer_id,
             campaign_ids,
             month_start,
-            mcc_customer_id=account.mcc_customer_id,
+            mcc_customer_id=effective_mcc_id,
         )
     except GoogleAdsError as e:
         logger.error(
@@ -196,13 +204,13 @@ def run_pacing(account_id):
             account.id,
             account.account_name,
             account.google_customer_id,
-            account.mcc_customer_id,
+            effective_mcc_id,
             e,
         )
         return jsonify({
             'error': (
                 f"Google Ads API error for '{account.account_name}' "
-                f"(customer {account.google_customer_id}, MCC {account.mcc_customer_id or 'none'}): {str(e)}"
+                f"(customer {account.google_customer_id}, MCC {effective_mcc_id or 'none'}): {str(e)}"
             )
         }), 502
 
