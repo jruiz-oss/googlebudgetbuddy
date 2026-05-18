@@ -149,14 +149,15 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
 
     live_ids = {str(lc['campaign_id']) for lc in live}
 
-    # Mark any DB campaigns no longer returned by the API as inactive
-    stale = Campaign.query.filter_by(account_id=account.id, is_active=True).filter(
-        ~Campaign.google_campaign_id.in_(live_ids)
-    ).all() if live_ids else []
-    deactivated = 0
-    for c in stale:
-        c.is_active = False
-        deactivated += 1
+    # Bulk-deactivate campaigns no longer returned by the API (single UPDATE,
+    # no dirty ORM objects, avoids autoflush/deadlock issues).
+    if live_ids:
+        Campaign.query.filter(
+            Campaign.account_id == account.id,
+            Campaign.is_active == True,
+            ~Campaign.google_campaign_id.in_(live_ids),
+        ).update({'is_active': False}, synchronize_session=False)
+        db.session.flush()
 
     added = updated = 0
     for lc in live:
@@ -288,13 +289,20 @@ def sync_from_mcc():
         for acct_id, live in live_by_account.items():
             live_ids = {str(lc['campaign_id']) for lc in live}
 
-            # Deactivate DB campaigns not returned by the API (removed/ended)
+            # Bulk-deactivate campaigns no longer returned by the API.
+            # Uses a direct UPDATE (not ORM objects) to avoid leaving dirty rows in
+            # the session that would trigger autoflush mid-loop and cause deadlocks
+            # if two workers run sync concurrently.
             if live_ids:
-                stale = Campaign.query.filter_by(account_id=acct_id, is_active=True).filter(
-                    ~Campaign.google_campaign_id.in_(live_ids)
-                ).all()
-                for c in stale:
-                    c.is_active = False
+                Campaign.query.filter(
+                    Campaign.account_id == acct_id,
+                    Campaign.is_active == True,
+                    ~Campaign.google_campaign_id.in_(live_ids),
+                ).update({'is_active': False}, synchronize_session=False)
+
+            # Flush the deactivation before the upsert loop so there are no
+            # pending dirty objects when we start issuing SELECTs below.
+            db.session.flush()
 
             for lc in live:
                 cid = str(lc['campaign_id'])
