@@ -7,6 +7,17 @@ import { SkeletonTable } from '../components/Skeleton';
 import EmptyState from '../components/EmptyState';
 import SpendChart from '../components/SpendChart';
 
+/** Group an array of objects by a key, preserving first-seen order. */
+function groupBy(arr, key) {
+  const map = new Map();
+  for (const item of arr) {
+    const k = item[key] || 'Primary';
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(item);
+  }
+  return map; // Map<string, item[]>
+}
+
 function StatusPill({ status }) {
   if (!status) return <span className="bb-pill bb-pill-muted">No data</span>;
   if (status === 'INCREASE') return <span className="bb-pill bb-pill-up"><TrendingUp size={12} /> Increase</span>;
@@ -376,51 +387,72 @@ export default function AccountDashboard() {
           </div>
         </div>
 
-        {recommendations.length > 0 && (
-          <table className="bb-table" style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th style={{ width: '32px' }}></th>
-                <th>Campaign</th>
-                <th>Monthly Budget</th>
-                <th>MTD Spend</th>
-                <th>Pace</th>
-                <th>Current Daily</th>
-                <th>Recommended Daily</th>
-                <th>Change</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recommendations.map(rec => (
-                <tr
-                  key={rec.campaign_id}
-                  className={rec.status === 'DECREASE' ? 'bb-table-row-tint-down' : rec.status === 'INCREASE' ? 'bb-table-row-tint-up' : ''}
-                  style={{ cursor: rec.status !== 'ON_PACE' ? 'pointer' : 'default' }}
-                  onClick={() => rec.status !== 'ON_PACE' && toggleSelect(rec.campaign_id)}
-                >
-                  <td>
-                    {rec.status !== 'ON_PACE' && (
-                      <input type="checkbox" checked={selected.has(rec.campaign_id)} onChange={() => toggleSelect(rec.campaign_id)} onClick={e => e.stopPropagation()} />
-                    )}
-                  </td>
-                  <td style={{ fontWeight: 500, cursor: 'pointer' }} onClick={e => { e.stopPropagation(); navigate(`/campaigns/${rec.campaign_id}`); }}>
-                    {rec.campaign_name}
-                  </td>
-                  <td>${rec.monthly_budget?.toFixed(2)}</td>
-                  <td>${rec.actual_spend?.toFixed(2)}</td>
-                  <td>{(rec.pace_ratio * 100).toFixed(1)}%</td>
-                  <td>${rec.current_daily_budget?.toFixed(2)}</td>
-                  <td style={{ fontWeight: 600 }}>${rec.recommended_daily_budget?.toFixed(2)}</td>
-                  <td style={{ color: rec.change_percent > 0 ? 'var(--color-warning)' : rec.change_percent < 0 ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
-                    {rec.change_percent > 0 ? '+' : ''}{rec.change_percent?.toFixed(1)}%
-                  </td>
-                  <td><StatusPill status={rec.status} /></td>
+        {recommendations.length > 0 && (() => {
+          const segMap = groupBy(recommendations, 'budget_label');
+          const isMultiSegment = segMap.size > 1;
+          return (
+            <table className="bb-table" style={{ width: '100%' }}>
+              <thead>
+                <tr>
+                  <th style={{ width: '32px' }}></th>
+                  <th>Campaign</th>
+                  <th>Monthly Budget</th>
+                  <th>MTD Spend</th>
+                  <th>Pace</th>
+                  <th>Current Daily</th>
+                  <th>Recommended Daily</th>
+                  <th>Change</th>
+                  <th>Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {[...segMap.entries()].map(([label, recs]) => {
+                  const segBudget = recs.reduce((s, r) => s + (r.monthly_budget || 0), 0);
+                  const segSpend  = recs.reduce((s, r) => s + (r.actual_spend  || 0), 0);
+                  const segPct    = segBudget > 0 ? (segSpend / segBudget * 100).toFixed(1) : '—';
+                  return [
+                    isMultiSegment && (
+                      <tr key={`seg-${label}`} style={{ background: 'var(--color-bg-subtle, #f5f7fa)' }}>
+                        <td colSpan={9} style={{ padding: '6px 12px', fontWeight: 700, fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--color-text-muted)', borderBottom: '2px solid var(--color-border)' }}>
+                          {label}
+                          <span style={{ fontWeight: 400, marginLeft: '12px', fontSize: '11px' }}>
+                            ${segBudget.toLocaleString('en-US', { minimumFractionDigits: 2 })} budget · ${segSpend.toLocaleString('en-US', { minimumFractionDigits: 2 })} spent ({segPct}%)
+                          </span>
+                        </td>
+                      </tr>
+                    ),
+                    ...recs.map(rec => (
+                      <tr
+                        key={rec.campaign_id}
+                        className={rec.status === 'DECREASE' ? 'bb-table-row-tint-down' : rec.status === 'INCREASE' ? 'bb-table-row-tint-up' : ''}
+                        style={{ cursor: rec.status !== 'ON_PACE' ? 'pointer' : 'default' }}
+                        onClick={() => rec.status !== 'ON_PACE' && toggleSelect(rec.campaign_id)}
+                      >
+                        <td>
+                          {rec.status !== 'ON_PACE' && (
+                            <input type="checkbox" checked={selected.has(rec.campaign_id)} onChange={() => toggleSelect(rec.campaign_id)} onClick={e => e.stopPropagation()} />
+                          )}
+                        </td>
+                        <td style={{ fontWeight: 500, cursor: 'pointer' }} onClick={e => { e.stopPropagation(); navigate(`/campaigns/${rec.campaign_id}`); }}>
+                          {rec.campaign_name}
+                        </td>
+                        <td>${rec.monthly_budget?.toFixed(2)}</td>
+                        <td>${rec.actual_spend?.toFixed(2)}</td>
+                        <td>{(rec.pace_ratio * 100).toFixed(1)}%</td>
+                        <td>${rec.current_daily_budget?.toFixed(2)}</td>
+                        <td style={{ fontWeight: 600 }}>${rec.recommended_daily_budget?.toFixed(2)}</td>
+                        <td style={{ color: rec.change_percent > 0 ? 'var(--color-warning)' : rec.change_percent < 0 ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
+                          {rec.change_percent > 0 ? '+' : ''}{rec.change_percent?.toFixed(1)}%
+                        </td>
+                        <td><StatusPill status={rec.status} /></td>
+                      </tr>
+                    )),
+                  ];
+                })}
+              </tbody>
+            </table>
+          );
+        })()}
 
         {!running && recommendations.length === 0 && (
           <EmptyState
@@ -464,30 +496,51 @@ export default function AccountDashboard() {
               </button>
             </div>
           </div>
-        ) : (
-          <table className="bb-table" style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th>Campaign</th>
-                <th>Monthly Budget</th>
-                <th>Last Spend</th>
-                <th>Status</th>
-                <th>Flight</th>
-              </tr>
-            </thead>
-            <tbody>
-              {activeCampaigns.map(c => (
-                <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
-                  <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
-                  <td>${(c.monthly_budget || 0).toFixed(2)}</td>
-                  <td>{c.latest_pacing ? `$${c.latest_pacing.actual_spend?.toFixed(2)}` : '—'}</td>
-                  <td><StatusPill status={c.latest_pacing?.status} /></td>
-                  <td><span className="bb-muted" style={{ fontSize: '13px' }}>{c.flight_type === 'ALWAYS_ON' ? 'Always On' : `${c.flight_start_date} → ${c.flight_end_date}`}</span></td>
+        ) : (() => {
+          const segMap = groupBy(activeCampaigns, 'budget_label');
+          const isMultiSegment = segMap.size > 1;
+          return (
+            <table className="bb-table" style={{ width: '100%' }}>
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Monthly Budget</th>
+                  <th>Last Spend</th>
+                  <th>Status</th>
+                  <th>Flight</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody>
+                {[...segMap.entries()].map(([label, camps]) => {
+                  const segBudget = camps.reduce((s, c) => s + (c.monthly_budget || 0), 0);
+                  const segSpend  = camps.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
+                  const segPct    = segBudget > 0 ? (segSpend / segBudget * 100).toFixed(1) : '—';
+                  return [
+                    isMultiSegment && (
+                      <tr key={`seg-${label}`} style={{ background: 'var(--color-bg-subtle, #f5f7fa)' }}>
+                        <td colSpan={5} style={{ padding: '6px 12px', fontWeight: 700, fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--color-text-muted)', borderBottom: '2px solid var(--color-border)' }}>
+                          {label}
+                          <span style={{ fontWeight: 400, marginLeft: '12px', fontSize: '11px' }}>
+                            ${segBudget.toLocaleString('en-US', { minimumFractionDigits: 2 })} budget · ${segSpend.toLocaleString('en-US', { minimumFractionDigits: 2 })} spent ({segPct}%)
+                          </span>
+                        </td>
+                      </tr>
+                    ),
+                    ...camps.map(c => (
+                      <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
+                        <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
+                        <td>${(c.monthly_budget || 0).toFixed(2)}</td>
+                        <td>{c.latest_pacing ? `$${c.latest_pacing.actual_spend?.toFixed(2)}` : '—'}</td>
+                        <td><StatusPill status={c.latest_pacing?.status} /></td>
+                        <td><span className="bb-muted" style={{ fontSize: '13px' }}>{c.flight_type === 'ALWAYS_ON' ? 'Always On' : `${c.flight_start_date} → ${c.flight_end_date}`}</span></td>
+                      </tr>
+                    )),
+                  ];
+                })}
+              </tbody>
+            </table>
+          );
+        })()}
       </div>
 
       {showImport && (
