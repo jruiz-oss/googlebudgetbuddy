@@ -129,6 +129,64 @@ def account_summary(account_id):
 
 
 # ---------------------------------------------------------------------------
+# Global MCC sync — reconcile DB against live MCC
+# ---------------------------------------------------------------------------
+
+@accounts_bp.route('/sync-from-mcc', methods=['POST'])
+@login_required
+def sync_from_mcc():
+    """One-button reconcile: pull the live MCC account list and:
+      - Update names for accounts that exist in both DB and MCC
+      - Delete DB accounts whose customer ID is not in the MCC at all
+      - (Does NOT add new accounts — use Import MCC modal for that)
+
+    Body (optional): { "mcc_id": "123-456-7890" }
+    """
+    import os
+    user_id = session['user_id']
+    token = _get_token_or_401(user_id)
+    if not token:
+        return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
+
+    data = request.get_json() or {}
+    mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
+
+    try:
+        live_accounts = list_mcc_child_accounts(token.refresh_token, mcc_id or None)
+    except GoogleAdsError as e:
+        return jsonify({'error': str(e)}), 502
+
+    # Build a lookup: customer_id (no dashes) → real name
+    live_by_id = {a['customer_id'].replace('-', ''): a['name'] for a in live_accounts}
+
+    db_accounts = Account.query.all()
+
+    updated = []
+    deleted = []
+
+    for account in db_accounts:
+        cid = (account.google_customer_id or '').replace('-', '')
+        if cid in live_by_id:
+            real_name = live_by_id[cid]
+            if real_name and real_name != account.account_name:
+                old = account.account_name
+                account.account_name = real_name
+                updated.append({'id': account.id, 'customer_id': cid, 'old': old, 'new': real_name})
+        else:
+            deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name})
+            db.session.delete(account)
+
+    db.session.commit()
+
+    return jsonify({
+        'message': f'Updated {len(updated)} name(s), removed {len(deleted)} unknown account(s).',
+        'updated': updated,
+        'deleted': deleted,
+        'live_account_count': len(live_accounts),
+    }), 200
+
+
+# ---------------------------------------------------------------------------
 # Bulk name refresh
 # ---------------------------------------------------------------------------
 

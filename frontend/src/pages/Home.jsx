@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2, CloudDownload, Pencil, Check, X } from 'lucide-react';
+import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2, CloudDownload, Pencil, Check, X, RotateCcw } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 import { SkeletonAccountBlock } from '../components/Skeleton';
@@ -217,12 +217,30 @@ function AddAccountModal({ onClose, onAdded }) {
 export default function Home() {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showMcc, setShowMcc] = useState(false);
   // Inline rename state: { accountId: { editing: bool, value: string, saving: bool } }
   const [renameState, setRenameState] = useState({});
   const navigate = useNavigate();
   const { addToast } = useToast();
+
+  const syncFromMcc = async () => {
+    setSyncing(true);
+    try {
+      const r = await axios.post('/api/accounts/sync-from-mcc');
+      const { updated, deleted, message } = r.data;
+      addToast(message, 'success');
+      if (deleted?.length) {
+        deleted.forEach(d => addToast(`Removed unknown account: ${d.name || d.customer_id}`, 'info'));
+      }
+      load();
+    } catch (e) {
+      addToast(e.response?.data?.error || 'Sync failed', 'error');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const startRename = (account, e) => {
     e.stopPropagation();
@@ -303,10 +321,10 @@ export default function Home() {
           <p className="bb-section-meta">All Google Ads accounts — Commit Agency</p>
         </div>
         <div className="bb-row" style={{ gap: '8px' }}>
-          <button className="bb-btn bb-btn-ghost" onClick={load}>
-            <RefreshCw size={16} /> Refresh
+          <button className="bb-btn bb-btn-secondary" onClick={syncFromMcc} disabled={syncing} title="Fix names + remove unknown accounts">
+            <RotateCcw size={16} /> {syncing ? 'Syncing…' : 'Sync Accounts'}
           </button>
-          <button className="bb-btn bb-btn-secondary" onClick={() => setShowMcc(true)}>
+          <button className="bb-btn bb-btn-ghost" onClick={() => setShowMcc(true)}>
             <CloudDownload size={16} /> Import from MCC
           </button>
           <button className="bb-btn bb-btn-primary" onClick={() => setShowAdd(true)}>
