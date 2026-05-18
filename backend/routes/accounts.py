@@ -6,6 +6,7 @@ Each account has a google_customer_id (10-digit, no dashes).
 """
 
 import logging
+import threading
 
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
@@ -20,6 +21,10 @@ from routes.auth import login_required
 logger = logging.getLogger(__name__)
 
 accounts_bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
+
+# Guards against concurrent MCC syncs (double-click / retry storms).
+# acquire(blocking=False) in the route; released in the background worker.
+_mcc_sync_lock = threading.Lock()
 
 
 def _get_token_or_401(user_id):
@@ -181,20 +186,184 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
     return added, updated
 
 
+def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
+    """Full MCC sync — runs in a background thread with its own Flask app context.
+
+    Releases _mcc_sync_lock when done so a subsequent sync can proceed.
+    All heavy Google Ads API calls and DB writes happen here, keeping the
+    HTTP handler free to return 202 immediately.
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+    try:
+        with app.app_context():
+            try:
+                live_accounts = list_mcc_child_accounts(
+                    refresh_token_str, mcc_id or None, resolve_names=True
+                )
+            except GoogleAdsError as e:
+                logger.error('MCC sync background job failed (account list): %s', e)
+                return
+
+            live_by_id = {a['customer_id'].replace('-', ''): a['name'] for a in live_accounts}
+            logger.info('MCC sync start: %d live accounts found in MCC', len(live_accounts))
+
+            db_accounts = Account.query.all()
+            updated = []
+            deleted = []
+            kept_accounts = []
+
+            for account in db_accounts:
+                cid = (account.google_customer_id or '').replace('-', '')
+                if cid not in live_by_id:
+                    deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'not_in_mcc'})
+                    db.session.delete(account)
+                    continue
+
+                real_name = live_by_id[cid]
+                name_is_real = real_name and not _name_looks_like_placeholder(real_name, cid)
+
+                if name_is_real:
+                    if real_name != account.account_name:
+                        old = account.account_name
+                        account.account_name = real_name
+                        updated.append({'id': account.id, 'customer_id': cid, 'old': old, 'new': real_name})
+                    kept_accounts.append(account)
+                else:
+                    if _name_looks_like_placeholder(account.account_name, cid):
+                        deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'no_real_name'})
+                        db.session.delete(account)
+                    else:
+                        kept_accounts.append(account)
+
+            db.session.commit()
+
+            # Fetch campaigns for all surviving accounts in parallel
+            campaigns_added = campaigns_updated = 0
+            if kept_accounts:
+                account_tuples = [
+                    (a.id, a.google_customer_id, a.mcc_customer_id)
+                    for a in kept_accounts
+                ]
+
+                def _fetch_campaigns(acct_id, customer_id, acct_mcc_id):
+                    try:
+                        live = list_campaigns(
+                            refresh_token_str,
+                            customer_id,
+                            mcc_customer_id=mcc_id or acct_mcc_id,
+                        )
+                        return acct_id, live
+                    except GoogleAdsError as e:
+                        logger.warning('Campaign fetch failed for account %s: %s', acct_id, e)
+                        return acct_id, []
+
+                live_by_account = {}
+                with ThreadPoolExecutor(max_workers=10) as pool:
+                    futs = {pool.submit(_fetch_campaigns, *t): t for t in account_tuples}
+                    for fut in _as_completed(futs):
+                        acct_id, live = fut.result()
+                        live_by_account[acct_id] = live
+
+                # Write to DB single-threaded
+                for acct_id, live in live_by_account.items():
+                    live_ids = {str(lc['campaign_id']) for lc in live}
+
+                    if live_ids:
+                        Campaign.query.filter(
+                            Campaign.account_id == acct_id,
+                            Campaign.is_active == True,
+                            ~Campaign.google_campaign_id.in_(live_ids),
+                        ).update({'is_active': False}, synchronize_session=False)
+
+                    db.session.flush()
+
+                    for lc in live:
+                        cid = str(lc['campaign_id'])
+                        existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
+                        if existing:
+                            existing.campaign_name = lc['campaign_name']
+                            existing.budget_resource_name = lc.get('budget_resource_name')
+                            existing.is_active = True
+                            campaigns_updated += 1
+                        else:
+                            db.session.add(Campaign(
+                                account_id=acct_id,
+                                campaign_name=lc['campaign_name'],
+                                google_campaign_id=cid,
+                                monthly_budget=0.0,
+                                budget_resource_name=lc.get('budget_resource_name'),
+                                is_active=True,
+                            ))
+                            campaigns_added += 1
+
+            logger.info(
+                'MCC sync campaigns: %d added, %d updated across %d accounts',
+                campaigns_added, campaigns_updated, len(kept_accounts),
+            )
+            if campaigns_added or campaigns_updated:
+                db.session.commit()
+
+            # Sync sheet budgets for accounts that have a sheet configured
+            sheet_synced = 0
+            kept_account_ids = [a.id for a in kept_accounts]
+            if kept_account_ids:
+                try:
+                    from routes.sheets import sync_sheet_budgets_for_account
+                    accounts_with_sheets = (
+                        Account.query
+                        .join(AccountSettings, Account.id == AccountSettings.account_id)
+                        .filter(
+                            Account.id.in_(kept_account_ids),
+                            AccountSettings.google_sheet_id.isnot(None),
+                            AccountSettings.google_sheet_id != '',
+                        )
+                        .all()
+                    )
+                    logger.info(
+                        'MCC sync sheet step: %d/%d accounts have a sheet configured',
+                        len(accounts_with_sheets), len(kept_account_ids),
+                    )
+                    for account in accounts_with_sheets:
+                        try:
+                            logger.info('MCC sync: syncing sheet budgets for account %s (%s)', account.id, account.account_name)
+                            sync_sheet_budgets_for_account(account.id)
+                            sheet_synced += 1
+                        except Exception as e:
+                            logger.warning(
+                                'Sheet budget sync failed for account %s during MCC sync: %s',
+                                account.id, e,
+                            )
+                except Exception as e:
+                    logger.warning('Sheet sync step skipped during MCC sync: %s', e)
+
+            logger.info(
+                'MCC sync complete: %d name(s) updated, %d account(s) removed, '
+                '%d campaigns added, %d updated, %d sheet(s) synced',
+                len(updated), len(deleted), campaigns_added, campaigns_updated, sheet_synced,
+            )
+    except Exception as e:
+        logger.error('MCC sync background job unexpected error: %s', e, exc_info=True)
+    finally:
+        _mcc_sync_lock.release()
+
+
 @accounts_bp.route('/sync-from-mcc', methods=['POST'])
 @login_required
 def sync_from_mcc():
-    """One-button reconcile: pull the live MCC account list and:
-      - Try to resolve real names for all accounts (resolve_names=True)
-      - Update names for accounts found in the MCC with a real name
-      - Delete DB accounts whose customer ID is not in the MCC at all
-      - Delete DB accounts that are in the MCC but still have placeholder names
-        after resolution (so nameless/ID-only accounts are cleaned up)
-      - Auto-sync all campaigns for every remaining account
+    """Kick off an MCC sync in the background and return 202 immediately.
 
+    The sync can take 60–120 s for large MCCs (parallel API calls + sheet syncs).
+    Running it synchronously causes Railway's 30 s HTTP timeout to kill the
+    request, so we fire-and-forget and let the client refresh after a delay.
+
+    Returns 409 if a sync is already running (prevents double-click storms).
     Body (optional): { "mcc_id": "123-456-7890" }
     """
     import os
+    from flask import current_app
+
     user_id = session['user_id']
     token = _get_token_or_401(user_id)
     if not token:
@@ -203,191 +372,21 @@ def sync_from_mcc():
     data = request.get_json() or {}
     mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
 
-    try:
-        # resolve_names=True does a secondary per-account GAQL lookup for any
-        # account whose descriptive_name comes back empty from the MCC batch call.
-        live_accounts = list_mcc_child_accounts(
-            token.refresh_token, mcc_id or None, resolve_names=True
-        )
-    except GoogleAdsError as e:
-        return jsonify({'error': str(e)}), 502
+    # Prevent concurrent syncs — if lock is already held return 409
+    if not _mcc_sync_lock.acquire(blocking=False):
+        return jsonify({'message': 'Sync already in progress — refresh in about a minute.'}), 409
 
-    # Build a lookup: customer_id (no dashes) → real name
-    live_by_id = {a['customer_id'].replace('-', ''): a['name'] for a in live_accounts}
-    logger.info('MCC sync start: %d live accounts found in MCC', len(live_accounts))
+    app = current_app._get_current_object()
+    refresh_token_str = token.refresh_token  # extract before thread spawns
 
-    db_accounts = Account.query.all()
-
-    updated = []
-    deleted = []
-    kept_accounts = []
-
-    for account in db_accounts:
-        cid = (account.google_customer_id or '').replace('-', '')
-        if cid not in live_by_id:
-            # Not in MCC at all → remove
-            deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'not_in_mcc'})
-            db.session.delete(account)
-            continue
-
-        real_name = live_by_id[cid]
-        name_is_real = real_name and not _name_looks_like_placeholder(real_name, cid)
-
-        if name_is_real:
-            # Got a good name — update if different
-            if real_name != account.account_name:
-                old = account.account_name
-                account.account_name = real_name
-                updated.append({'id': account.id, 'customer_id': cid, 'old': old, 'new': real_name})
-            kept_accounts.append(account)
-        else:
-            # Still a placeholder name after resolution
-            if _name_looks_like_placeholder(account.account_name, cid):
-                # DB name is also a placeholder → no real name anywhere, remove it
-                deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'no_real_name'})
-                db.session.delete(account)
-            else:
-                # DB already has a real name the user set manually — keep it
-                kept_accounts.append(account)
-
-    db.session.commit()
-
-    # Auto-sync campaigns for all surviving accounts — run in parallel so
-    # N accounts take ~1× latency instead of N× latency.
-    # IMPORTANT: extract plain strings from ORM objects BEFORE spawning threads —
-    # SQLAlchemy objects can't be accessed outside the Flask app context.
-    campaigns_added = campaigns_updated = 0
-    if kept_accounts:
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-
-        refresh_token_str = token.refresh_token  # plain string, safe across threads
-        account_tuples = [
-            (a.id, a.google_customer_id, a.mcc_customer_id)
-            for a in kept_accounts
-        ]
-
-        def _fetch_campaigns(acct_id, customer_id, acct_mcc_id):
-            try:
-                live = list_campaigns(
-                    refresh_token_str,
-                    customer_id,
-                    mcc_customer_id=mcc_id or acct_mcc_id,
-                )
-                return acct_id, live
-            except GoogleAdsError as e:
-                logger.warning('Campaign fetch failed for account %s: %s', acct_id, e)
-                return acct_id, []
-
-        live_by_account = {}
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futs = {pool.submit(_fetch_campaigns, *t): t for t in account_tuples}
-            for fut in _as_completed(futs):
-                acct_id, live = fut.result()
-                live_by_account[acct_id] = live
-
-        # Write to DB (single-threaded to avoid SQLAlchemy session conflicts)
-        for acct_id, live in live_by_account.items():
-            live_ids = {str(lc['campaign_id']) for lc in live}
-
-            # Bulk-deactivate campaigns no longer returned by the API.
-            # Uses a direct UPDATE (not ORM objects) to avoid leaving dirty rows in
-            # the session that would trigger autoflush mid-loop and cause deadlocks
-            # if two workers run sync concurrently.
-            if live_ids:
-                Campaign.query.filter(
-                    Campaign.account_id == acct_id,
-                    Campaign.is_active == True,
-                    ~Campaign.google_campaign_id.in_(live_ids),
-                ).update({'is_active': False}, synchronize_session=False)
-
-            # Flush the deactivation before the upsert loop so there are no
-            # pending dirty objects when we start issuing SELECTs below.
-            db.session.flush()
-
-            for lc in live:
-                cid = str(lc['campaign_id'])
-                existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
-                if existing:
-                    existing.campaign_name = lc['campaign_name']
-                    existing.budget_resource_name = lc.get('budget_resource_name')
-                    existing.is_active = True
-                    campaigns_updated += 1
-                else:
-                    db.session.add(Campaign(
-                        account_id=acct_id,
-                        campaign_name=lc['campaign_name'],
-                        google_campaign_id=cid,
-                        monthly_budget=0.0,
-                        budget_resource_name=lc.get('budget_resource_name'),
-                        is_active=True,
-                    ))
-                    campaigns_added += 1
-
-    logger.info(
-        'MCC sync campaigns: %d added, %d updated across %d accounts',
-        campaigns_added, campaigns_updated, len(kept_accounts),
+    t = threading.Thread(
+        target=_run_mcc_sync_job,
+        args=(app, refresh_token_str, mcc_id),
+        daemon=True,
     )
-    if campaigns_added or campaigns_updated:
-        db.session.commit()
+    t.start()
 
-    # Sync sheet budgets for all surviving accounts that have a Google Sheet configured.
-    # This runs after the campaign upsert so monthly_budget is populated immediately
-    # rather than requiring a separate pacing run.
-    # IMPORTANT: re-query account IDs fresh from DB — the kept_accounts ORM objects
-    # may be expired/detached after the db.session.commit() above, causing lazy-load
-    # of account.settings to silently return None and skip every account.
-    sheet_synced = 0
-    sheet_sync_errors = []
-    kept_account_ids = [a.id for a in kept_accounts]
-    if kept_account_ids:
-        try:
-            from routes.sheets import sync_sheet_budgets_for_account
-            # Fresh query — not affected by the prior commit's session expiry
-            accounts_with_sheets = (
-                Account.query
-                .join(AccountSettings, Account.id == AccountSettings.account_id)
-                .filter(
-                    Account.id.in_(kept_account_ids),
-                    AccountSettings.google_sheet_id.isnot(None),
-                    AccountSettings.google_sheet_id != '',
-                )
-                .all()
-            )
-            logger.info(
-                'MCC sync sheet step: %d/%d accounts have a sheet configured',
-                len(accounts_with_sheets), len(kept_account_ids),
-            )
-            for account in accounts_with_sheets:
-                try:
-                    logger.info('MCC sync: syncing sheet budgets for account %s (%s)', account.id, account.account_name)
-                    sync_sheet_budgets_for_account(account.id)
-                    sheet_synced += 1
-                except Exception as e:
-                    logger.warning(
-                        'Sheet budget sync failed for account %s during MCC sync: %s',
-                        account.id, e,
-                    )
-                    sheet_sync_errors.append({'account_id': account.id, 'error': str(e)})
-        except Exception as e:
-            logger.warning('Sheet sync step skipped during MCC sync: %s', e)
-
-    msg_parts = [
-        f'Updated {len(updated)} name(s), removed {len(deleted)} account(s).',
-        f'Campaigns: {campaigns_added} added, {campaigns_updated} updated.',
-    ]
-    if sheet_synced:
-        msg_parts.append(f'Budgets synced from sheet for {sheet_synced} account(s).')
-
-    return jsonify({
-        'message': ' '.join(msg_parts),
-        'updated': updated,
-        'deleted': deleted,
-        'live_account_count': len(live_accounts),
-        'campaigns_added': campaigns_added,
-        'campaigns_updated': campaigns_updated,
-        'sheet_synced': sheet_synced,
-        'sheet_sync_errors': sheet_sync_errors,
-    }), 200
+    return jsonify({'message': 'Sync started — refresh the page in about 60 seconds.'}), 202
 
 
 # ---------------------------------------------------------------------------

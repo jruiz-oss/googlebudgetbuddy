@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2, CloudDownload, Pencil, Check, X, RotateCcw } from 'lucide-react';
+import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2, CloudDownload, RotateCcw, Play } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 import { SkeletonAccountBlock } from '../components/Skeleton';
@@ -18,8 +18,6 @@ function StatusPill({ status }) {
 
 function ImportMccModal({ onClose, onImported, existingIds }) {
   const [accounts, setAccounts] = useState([]);
-  // editedNames lets users fix account names before importing
-  const [editedNames, setEditedNames] = useState({});
   const [selected, setSelected] = useState(new Set());
   const [mccId, setMccId] = useState('');
   const [loading, setLoading] = useState(false);
@@ -36,8 +34,6 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
       const newOnes = new Set(all.filter(a => !existingIds.has(a.customer_id)).map(a => a.customer_id));
       setAccounts(all);
       setSelected(newOnes);
-      // Reset any previous edits
-      setEditedNames({});
     } catch (e) {
       setError(e.response?.data?.error || 'Failed to load accounts from MCC');
     } finally {
@@ -48,8 +44,6 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
   const toggle = (id) => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const toggleAll = () => setSelected(selected.size === accounts.length ? new Set() : new Set(accounts.map(a => a.customer_id)));
 
-  const getDisplayName = (a) => editedNames[a.customer_id] ?? a.name;
-
   const handleImport = async () => {
     if (!selected.size) return;
     setImporting(true);
@@ -58,7 +52,7 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
     for (const acct of toImport) {
       try {
         await axios.post('/api/accounts', {
-          account_name: getDisplayName(acct).trim() || acct.customer_id,
+          account_name: acct.name.trim() || acct.customer_id,
           google_customer_id: acct.customer_id,
           mcc_customer_id: mccId.replace(/-/g, '') || null,
         });
@@ -100,9 +94,6 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
                 {selected.size === accounts.length ? 'Deselect all' : 'Select all'}
               </button>
             </div>
-            <p className="bb-muted" style={{ fontSize: '12px', marginBottom: '8px' }}>
-              You can edit any account name before importing — just click the name field.
-            </p>
             <div style={{ maxHeight: '340px', overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: '8px', marginBottom: '16px' }}>
               {accounts.map(a => {
                 const alreadyExists = existingIds.has(a.customer_id);
@@ -122,19 +113,7 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
                       disabled={alreadyExists}
                       style={{ flexShrink: 0, cursor: alreadyExists ? 'default' : 'pointer' }}
                     />
-                    {/* Editable name field */}
-                    <input
-                      className="bb-input"
-                      value={getDisplayName(a)}
-                      onChange={e => setEditedNames(n => ({ ...n, [a.customer_id]: e.target.value }))}
-                      disabled={alreadyExists}
-                      style={{
-                        flex: 1, fontWeight: 500, fontSize: '14px',
-                        padding: '4px 8px', height: '32px',
-                        background: alreadyExists ? 'transparent' : undefined,
-                        border: alreadyExists ? 'none' : undefined,
-                      }}
-                    />
+                    <span style={{ flex: 1, fontWeight: 500, fontSize: '14px' }}>{a.name}</span>
                     <span className="bb-muted" style={{ fontSize: '12px', whiteSpace: 'nowrap' }}>
                       ID: {a.customer_id}
                     </span>
@@ -218,12 +197,11 @@ export default function Home() {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [runningAll, setRunningAll] = useState(false);
   const [sharedSheetId, setSharedSheetId] = useState('');
   const [applyingSharedSheet, setApplyingSharedSheet] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showMcc, setShowMcc] = useState(false);
-  // Inline rename state: { accountId: { editing: bool, value: string, saving: bool } }
-  const [renameState, setRenameState] = useState({});
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -231,47 +209,51 @@ export default function Home() {
     setSyncing(true);
     try {
       const r = await axios.post('/api/accounts/sync-from-mcc', {});
-      const { updated, deleted, campaigns_added, campaigns_updated, message } = r.data;
-      toast.success(message || 'Sync complete — no changes detected.');
-      if (deleted?.length) {
-        const noName = deleted.filter(d => d.reason === 'no_real_name');
-        const notInMcc = deleted.filter(d => d.reason === 'not_in_mcc');
-        noName.forEach(d => toast.info(`Removed nameless account: ${d.customer_id}`));
-        notInMcc.forEach(d => toast.info(`Removed unknown account: ${d.name || d.customer_id}`));
+      if (r.status === 202) {
+        // Sync kicked off in background — reload after it has time to finish
+        toast.success(r.data.message || 'Sync started — refreshing in 75 seconds…');
+        setTimeout(() => {
+          load();
+          setSyncing(false);
+        }, 75000);
+      } else if (r.status === 409) {
+        toast.info(r.data.message || 'Sync already in progress — please wait.');
+        setSyncing(false);
+      } else {
+        // Legacy synchronous response (shouldn't happen, but handle gracefully)
+        const { message } = r.data;
+        toast.success(message || 'Sync complete.');
+        load();
+        setSyncing(false);
       }
-      load();
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Sync failed');
-    } finally {
+      const status = e.response?.status;
+      if (status === 409) {
+        toast.info(e.response?.data?.message || 'Sync already in progress — please wait.');
+      } else {
+        toast.error(e.response?.data?.error || 'Sync failed');
+      }
       setSyncing(false);
     }
   };
 
-  const startRename = (account, e) => {
-    e.stopPropagation();
-    setRenameState(s => ({ ...s, [account.id]: { editing: true, value: account.account_name, saving: false } }));
-  };
-
-  const cancelRename = (id, e) => {
-    e && e.stopPropagation();
-    setRenameState(s => { const n = { ...s }; delete n[id]; return n; });
-  };
-
-  const saveRename = async (account, e) => {
-    e && e.stopPropagation();
-    const rs = renameState[account.id];
-    if (!rs) return;
-    const newName = rs.value.trim();
-    if (!newName || newName === account.account_name) { cancelRename(account.id); return; }
-    setRenameState(s => ({ ...s, [account.id]: { ...s[account.id], saving: true } }));
+  const runAllPacing = async () => {
+    setRunningAll(true);
+    toast.info(`Running pacing for ${accounts.length} account(s)…`);
     try {
-      await axios.put(`/api/accounts/${account.id}`, { account_name: newName });
-      toast.success('Account renamed');
-      cancelRename(account.id);
+      const r = await axios.post('/api/pacing/run-all');
+      const { accounts_ok, accounts_failed, total_campaigns_paced, results } = r.data;
+      if (accounts_failed > 0) {
+        const failNames = results.filter(r => r.status === 'error').map(r => r.account_name).join(', ');
+        toast.warn(`Pacing done: ${accounts_ok} ok, ${accounts_failed} failed (${failNames}). ${total_campaigns_paced} campaigns paced.`);
+      } else {
+        toast.success(`Pacing complete — ${accounts_ok} account(s), ${total_campaigns_paced} campaigns updated.`);
+      }
       load();
-    } catch {
-      toast.error('Rename failed');
-      setRenameState(s => ({ ...s, [account.id]: { ...s[account.id], saving: false } }));
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Run all pacing failed');
+    } finally {
+      setRunningAll(false);
     }
   };
 
@@ -356,8 +338,16 @@ export default function Home() {
           <p className="bb-section-meta">All Google Ads accounts — Commit Agency{!loading && accounts.length > 0 ? ` · ${accounts.length} account${accounts.length === 1 ? '' : 's'}` : ''}</p>
         </div>
         <div className="bb-row" style={{ gap: '8px' }}>
-          <button className="bb-btn bb-btn-secondary" onClick={syncFromMcc} disabled={syncing} title="Fix names + remove unknown accounts">
+          <button className="bb-btn bb-btn-secondary" onClick={syncFromMcc} disabled={syncing || runningAll} title="Sync campaign metadata + sheet budgets from MCC">
             <RotateCcw size={16} /> {syncing ? 'Syncing…' : 'Sync Accounts'}
+          </button>
+          <button
+            className="bb-btn bb-btn-secondary"
+            onClick={runAllPacing}
+            disabled={runningAll || syncing || accounts.length === 0}
+            title="Fetch live MTD spend + update pacing for all accounts"
+          >
+            <Play size={16} /> {runningAll ? 'Running Pacing…' : 'Run All Pacing'}
           </button>
           <button className="bb-btn bb-btn-ghost" onClick={() => setShowMcc(true)}>
             <CloudDownload size={16} /> Import from MCC
@@ -435,39 +425,10 @@ export default function Home() {
             const spendPct = acctBudget > 0 ? Math.min((acctSpend / acctBudget) * 100, 100) : 0;
 
             return (
-              <div key={account.id} className="bb-card" style={{ cursor: 'pointer' }} onClick={() => !renameState[account.id]?.editing && navigate(`/accounts/${account.id}`)}>
+              <div key={account.id} className="bb-card" style={{ cursor: 'pointer' }} onClick={() => navigate(`/accounts/${account.id}`)}>
                 <div className="bb-row-between" style={{ marginBottom: '12px' }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    {renameState[account.id]?.editing ? (
-                      <div className="bb-row" style={{ gap: '6px', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-                        <input
-                          className="bb-input"
-                          value={renameState[account.id].value}
-                          onChange={e => setRenameState(s => ({ ...s, [account.id]: { ...s[account.id], value: e.target.value } }))}
-                          onKeyDown={e => { if (e.key === 'Enter') saveRename(account, e); if (e.key === 'Escape') cancelRename(account.id, e); }}
-                          autoFocus
-                          style={{ fontSize: '15px', fontWeight: 600, padding: '4px 8px', height: '34px' }}
-                        />
-                        <button className="bb-btn bb-btn-primary" style={{ padding: '4px 10px', height: '34px' }} onClick={e => saveRename(account, e)} disabled={renameState[account.id].saving}>
-                          <Check size={14} />
-                        </button>
-                        <button className="bb-btn bb-btn-ghost" style={{ padding: '4px 10px', height: '34px' }} onClick={e => cancelRename(account.id, e)}>
-                          <X size={14} />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="bb-row" style={{ gap: '6px', alignItems: 'center' }}>
-                        <h2 className="bb-section-title" style={{ marginBottom: '2px' }}>{account.account_name}</h2>
-                        <button
-                          className="bb-btn bb-btn-ghost"
-                          style={{ padding: '2px 6px', opacity: 0.5 }}
-                          title="Rename account"
-                          onClick={e => startRename(account, e)}
-                        >
-                          <Pencil size={13} />
-                        </button>
-                      </div>
-                    )}
+                    <h2 className="bb-section-title" style={{ marginBottom: '2px' }}>{account.account_name}</h2>
                     <p className="bb-muted" style={{ fontSize: '13px' }}>ID: {account.google_customer_id}</p>
                   </div>
                   <div className="bb-row" style={{ gap: '8px' }} onClick={e => e.stopPropagation()}>
