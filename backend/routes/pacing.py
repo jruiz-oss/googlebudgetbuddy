@@ -480,6 +480,187 @@ def pacing_summary(account_id):
 
 
 # ---------------------------------------------------------------------------
+# /run-all — run pacing for every account in one shot
+# ---------------------------------------------------------------------------
+
+@pacing_bp.route('/run-all', methods=['POST'])
+@login_required
+def run_all_pacing():
+    """Run pacing for every account. Sheet sync → spend fetch → PacingData write.
+
+    Returns a per-account result list so the frontend can surface errors.
+    """
+    user_id = session['user_id']
+    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
+    if not token:
+        return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
+
+    accounts = Account.query.options(
+        selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+        selectinload(Account.settings),
+    ).all()
+
+    results = []
+    today = datetime.utcnow().date()
+    month_start, _ = _month_bounds(today)
+
+    for account in accounts:
+        acct_result = {
+            'account_id': account.id,
+            'account_name': account.account_name,
+            'status': 'ok',
+            'campaigns_paced': 0,
+            'error': None,
+        }
+
+        try:
+            settings = account.settings
+            if not settings:
+                settings = AccountSettings(account_id=account.id)
+                db.session.add(settings)
+                db.session.commit()
+
+            effective_mcc_id = _effective_mcc_customer_id(account)
+
+            # 1. Sheet sync (source of truth for monthly_budget)
+            if settings.google_sheet_id:
+                try:
+                    from routes.sheets import sync_sheet_budgets_for_account
+                    sync_sheet_budgets_for_account(account.id)
+                    db.session.expire_all()
+                    account = Account.query.options(
+                        selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                        selectinload(Account.settings),
+                    ).get(account.id)
+                    settings = account.settings
+                    effective_mcc_id = _effective_mcc_customer_id(account)
+                except Exception as e:
+                    logger.warning('Sheet sync failed for account %s in run-all: %s', account.id, e)
+
+            # 2. Active campaigns
+            active_campaigns = [
+                c for c in account.campaigns
+                if c.is_active and _campaign_is_active_today(c, today)
+            ]
+            if not active_campaigns:
+                results.append(acct_result)
+                continue
+
+            # 3. Fetch MTD spend from Google Ads API
+            campaign_ids = [c.google_campaign_id for c in active_campaigns]
+            metrics_by_id = get_campaign_mtd_spend(
+                token.refresh_token,
+                account.google_customer_id,
+                campaign_ids,
+                month_start,
+                mcc_customer_id=effective_mcc_id,
+            )
+
+            # 4. Compute recommendations and write PacingData snapshots
+            for campaign in active_campaigns:
+                campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
+                actual_spend = campaign_metrics.get('spend', 0.0)
+                clicks = campaign_metrics.get('clicks', None)
+                conversions = campaign_metrics.get('conversions', None)
+                cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
+
+                latest_rows = sorted(
+                    campaign.pacing_data,
+                    key=lambda r: (r.date or datetime.min.date(), r.id or 0),
+                )
+                current_daily = (
+                    latest_rows[-1].current_daily_budget
+                    if latest_rows and latest_rows[-1].current_daily_budget
+                    else 0.0
+                )
+
+                rec, status, pace_ratio, expected_mtd, _ = _compute_recommendation(
+                    campaign.monthly_budget, actual_spend, current_daily, today
+                )
+                _, month_end = _month_bounds(today)
+                change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
+
+                db.session.add(PacingData(
+                    campaign_id=campaign.id,
+                    date=today,
+                    current_daily_budget=current_daily,
+                    actual_spend=round(actual_spend, 2),
+                    expected_spend=round(expected_mtd, 2),
+                    pace_ratio=round(pace_ratio, 3),
+                    recommended_daily_budget=round(rec, 2),
+                    change_percent=round(change_pct, 1),
+                    status=status,
+                    clicks=clicks,
+                    conversions=round(conversions, 1) if conversions is not None else None,
+                    cpc=cpc,
+                ))
+
+            db.session.commit()
+
+            # 5. Write spend back to sheet
+            if settings.google_sheet_id:
+                try:
+                    from routes.sheets import write_sheet_spend_for_account
+                    write_sheet_spend_for_account(account.id)
+                except Exception as e:
+                    logger.warning('Sheet writeback failed for account %s in run-all: %s', account.id, e)
+
+            # 6. Log the pacing run
+            db.session.add(PacingRun(
+                account_id=account.id,
+                run_type='MANUAL',
+                triggered_by='run_all',
+                campaigns_processed=len(active_campaigns),
+                adjustments_made=0,
+                status='COMPLETED',
+            ))
+            db.session.commit()
+
+            acct_result['campaigns_paced'] = len(active_campaigns)
+
+        except GoogleAdsError as e:
+            logger.error('run-all Google Ads error for account %s: %s', account.id, e)
+            acct_result['status'] = 'error'
+            acct_result['error'] = str(e)
+            # Log failed run
+            try:
+                db.session.add(PacingRun(
+                    account_id=account.id,
+                    run_type='MANUAL',
+                    triggered_by='run_all',
+                    campaigns_processed=0,
+                    adjustments_made=0,
+                    status='FAILED',
+                    error_message=str(e),
+                ))
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        except Exception as e:
+            logger.error('run-all pacing failed for account %s: %s', account.id, e)
+            acct_result['status'] = 'error'
+            acct_result['error'] = str(e)
+            db.session.rollback()
+
+        results.append(acct_result)
+
+    ok = [r for r in results if r['status'] == 'ok']
+    errors = [r for r in results if r['status'] == 'error']
+    total_campaigns = sum(r['campaigns_paced'] for r in ok)
+
+    return jsonify({
+        'message': (
+            f'Pacing complete: {len(ok)} account(s) updated, {len(errors)} failed. '
+            f'{total_campaigns} campaign(s) paced.'
+        ),
+        'results': results,
+        'accounts_ok': len(ok),
+        'accounts_failed': len(errors),
+        'total_campaigns_paced': total_campaigns,
+    })
+
+
+# ---------------------------------------------------------------------------
 # /pause — manual auto-pause for an account
 # ---------------------------------------------------------------------------
 
