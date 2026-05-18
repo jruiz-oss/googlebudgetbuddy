@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download } from 'lucide-react';
+import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2 } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 import { SkeletonAccountBlock } from '../components/Skeleton';
@@ -178,6 +178,22 @@ export default function Home() {
                     </button>
                     <button className="bb-btn bb-btn-ghost" style={{ padding: '6px 10px' }} onClick={() => navigate(`/accounts/${account.id}/settings`)}>
                       <Settings size={15} />
+                    </button>
+                    <button
+                      className="bb-btn bb-btn-ghost"
+                      style={{ padding: '6px 10px', color: 'var(--color-danger)' }}
+                      onClick={async () => {
+                        if (!confirm(`Delete "${account.account_name}"? This cannot be undone.`)) return;
+                        try {
+                          await axios.delete(`/api/accounts/${account.id}`);
+                          addToast(`"${account.account_name}" deleted`, 'info');
+                          load();
+                        } catch {
+                          addToast('Delete failed', 'error');
+                        }
+                      }}
+                    >
+                      <Trash2 size={15} />
                     </button>
                     <button className="bb-btn bb-btn-primary" style={{ padding: '6px 14px', fontSize: '13px' }} onClick={() => navigate(`/accounts/${account.id}`)}>
                       View
