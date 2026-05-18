@@ -143,10 +143,16 @@ def run_pacing(account_id):
             'sheet_sync': sheet_sync,
         })
 
+    # Grant account safeguard: log exemption status upfront
+    is_grant_account = 'grant' in account.account_name.lower()
+    if is_grant_account:
+        logger.info('Account %s is a Grant account — auto-pause will be skipped', account_id)
+
     # 3. Fetch MTD spend from Google Ads API
+    # Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
     campaign_ids = [c.google_campaign_id for c in active_campaigns]
     try:
-        spend_by_id = get_campaign_mtd_spend(
+        metrics_by_id = get_campaign_mtd_spend(
             token.refresh_token,
             account.google_customer_id,
             campaign_ids,
@@ -160,7 +166,11 @@ def run_pacing(account_id):
     # 4. Compute recommendations and save PacingData snapshots
     recommendations = []
     for campaign in active_campaigns:
-        actual_spend = spend_by_id.get(campaign.google_campaign_id, 0.0)
+        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
+        actual_spend = campaign_metrics.get('spend', 0.0)
+        clicks = campaign_metrics.get('clicks', None)
+        conversions = campaign_metrics.get('conversions', None)
+        cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
 
         # Get current daily budget from most recent PacingData or default to 0
         latest_rows = sorted(
@@ -179,7 +189,7 @@ def run_pacing(account_id):
         days_remaining = (month_end - today).days + 1
         change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
 
-        # Save snapshot
+        # Save snapshot (with new performance metrics)
         snap = PacingData(
             campaign_id=campaign.id,
             date=today,
@@ -190,6 +200,9 @@ def run_pacing(account_id):
             recommended_daily_budget=round(rec, 2),
             change_percent=round(change_pct, 1),
             status=status,
+            clicks=clicks,
+            conversions=round(conversions, 1) if conversions is not None else None,
+            cpc=cpc,
         )
         db.session.add(snap)
 
@@ -198,6 +211,7 @@ def run_pacing(account_id):
             'campaign_name': campaign.campaign_name,
             'google_campaign_id': campaign.google_campaign_id,
             'budget_resource_name': campaign.budget_resource_name,
+            'budget_label': campaign.budget_label,
             'monthly_budget': round(campaign.monthly_budget, 2),
             'actual_spend': round(actual_spend, 2),
             'expected_spend': round(expected_mtd, 2),
@@ -209,6 +223,9 @@ def run_pacing(account_id):
             'days_elapsed': days_elapsed,
             'days_remaining': days_remaining,
             'days_in_month': days_in_month,
+            'clicks': clicks,
+            'conversions': round(conversions, 1) if conversions is not None else None,
+            'cpc': cpc,
         })
 
     db.session.commit()
@@ -221,8 +238,9 @@ def run_pacing(account_id):
     }
 
     # 5. Check auto-pause threshold
+    # Grant accounts are exempt from auto-pause (they can safely exceed caps).
     auto_pause_triggered = None
-    if settings.auto_pause_enabled and active_campaigns:
+    if settings.auto_pause_enabled and active_campaigns and not is_grant_account:
         total_budget = sum(c.monthly_budget for c in active_campaigns)
         total_spend = sum(r['actual_spend'] for r in recommendations)
         if total_budget > 0:
@@ -233,6 +251,13 @@ def run_pacing(account_id):
                     'threshold': settings.auto_pause_threshold,
                     'message': f'Account has reached {spend_pct:.1f}% of monthly budget.',
                 }
+    elif is_grant_account and settings.auto_pause_enabled:
+        auto_pause_triggered = {
+            'spend_pct': 0,
+            'threshold': settings.auto_pause_threshold,
+            'message': 'Grant account — auto-pause is disabled for this account type.',
+            'grant_exempt': True,
+        }
 
     return jsonify({
         'recommendations': recommendations,

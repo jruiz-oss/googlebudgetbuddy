@@ -101,11 +101,46 @@ def _gaql(access_token: str, customer_id: str, developer_token: str,
 # Account / MCC helpers
 # ---------------------------------------------------------------------------
 
+def _fetch_customer_name(access_token: str, customer_id: str,
+                          developer_token: str, mcc_id: str) -> str:
+    """Fetch a single customer's descriptive_name via a direct account query.
+
+    Used as a fallback when customer_client.descriptive_name comes back empty
+    (which happens for some account types / recently-created accounts).
+    Returns empty string on any failure so the caller can decide the fallback.
+    """
+    try:
+        rows = _gaql(
+            access_token,
+            customer_id,
+            developer_token,
+            'SELECT customer.descriptive_name FROM customer LIMIT 1',
+            mcc_customer_id=mcc_id,
+        )
+        if rows:
+            return (rows[0].get('customer', {}).get('descriptiveName') or '').strip()
+    except Exception as exc:
+        logger.debug('Secondary name lookup failed for %s: %s', customer_id, exc)
+    return ''
+
+
+def _fmt_customer_id(raw_id: str) -> str:
+    """Format a 10-digit customer ID as XXX-XXX-XXXX for display."""
+    digits = raw_id.replace('-', '')
+    if len(digits) == 10:
+        return f'{digits[:3]}-{digits[3:6]}-{digits[6:]}'
+    return raw_id
+
+
 def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> list:
     """Return all active non-manager accounts under the MCC.
 
     Queries customer_client from the MCC account — same approach as the
     working Lovable app. Returns [{customer_id, name}, ...]
+
+    If customer_client.descriptive_name is empty (common for some account
+    types), a secondary per-account query is made to fetch
+    customer.descriptive_name directly. Falls back to a formatted ID.
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     mcc_id = (mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
@@ -143,14 +178,24 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> 
         for row in (batch.get('results') or []):
             cc = row.get('customerClient', {})
             raw_id = str(cc.get('id', ''))
-            name = cc.get('descriptiveName') or f'Account {raw_id}'
+            name = (cc.get('descriptiveName') or '').strip()
             if raw_id:
                 accounts.append({
                     'customer_id': raw_id,
-                    'name': name,
+                    'name': name,  # may be empty; resolved below
                 })
 
-    accounts.sort(key=lambda a: a.get('name', ''))
+    # Secondary pass: for any account with no descriptive name, query the
+    # account directly for customer.descriptive_name.  We accept the extra
+    # round-trips because the MCC list is typically small (< 100 accounts).
+    for acct in accounts:
+        if not acct['name']:
+            fetched = _fetch_customer_name(
+                access_token, acct['customer_id'], developer_token, mcc_id
+            )
+            acct['name'] = fetched if fetched else _fmt_customer_id(acct['customer_id'])
+
+    accounts.sort(key=lambda a: a.get('name', '').lower())
     return accounts
 
 
@@ -158,11 +203,19 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> 
 # Campaign helpers
 # ---------------------------------------------------------------------------
 
-def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = None) -> list:
-    """Return all ENABLED campaigns for the given customer.
+# Channel types that use non-standard budget structures and would cause phantom
+# budget bloat if included. Mirrors the script's filtering logic.
+_PHANTOM_CHANNEL_TYPES = {'LOCAL_SERVICES', 'SMART', 'HOTEL', 'LOCAL'}
 
-    Returns: [{campaign_id, campaign_name, status, budget_resource_name,
-               daily_budget_micros, daily_budget_usd}, ...]
+
+def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = None) -> list:
+    """Return all ENABLED/PAUSED campaigns for the given customer.
+
+    Excludes phantom-budget channel types (LOCAL_SERVICES, SMART, HOTEL, LOCAL)
+    that use non-standard budget structures and would inflate totals.
+
+    Returns: [{campaign_id, campaign_name, status, channel_type,
+               budget_resource_name, daily_budget_micros, daily_budget_usd}, ...]
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     access_token = get_access_token(refresh_token)
@@ -172,6 +225,7 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
           campaign.id,
           campaign.name,
           campaign.status,
+          campaign.advertising_channel_type,
           campaign.campaign_budget,
           campaign_budget.id,
           campaign_budget.amount_micros,
@@ -187,11 +241,16 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
     for r in rows:
         c = r.get('campaign', {})
         b = r.get('campaignBudget', {})
+        channel_type = (c.get('advertisingChannelType') or '').upper()
+        # Skip phantom-budget channel types
+        if channel_type in _PHANTOM_CHANNEL_TYPES:
+            continue
         micros = int(b.get('amountMicros', 0) or 0)
         campaigns.append({
             'campaign_id': str(c.get('id', '')),
             'campaign_name': c.get('name', ''),
             'status': c.get('status', ''),
+            'channel_type': channel_type,
             'budget_resource_name': b.get('resourceName', ''),
             'daily_budget_micros': micros,
             'daily_budget_usd': round(micros / 1_000_000, 2),
@@ -202,10 +261,15 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
 def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
                             campaign_ids: list, month_start: date,
                             mcc_customer_id: str = None) -> dict:
-    """Return MTD spend (USD) per campaign ID for the current month.
+    """Return MTD spend, clicks, and conversions per campaign ID for the current month.
 
     month_start: date object for the first of the month (e.g. date(2026, 5, 1))
-    Returns: {campaign_id_str: spend_usd_float, ...}
+    Returns: {campaign_id_str: {'spend': float, 'clicks': int, 'conversions': float}, ...}
+
+    Note: historical spend from ended/paused campaigns is included (script parity) —
+    a campaign that ran earlier in the month still contributes to the MTD total even
+    if it's paused today. The 'daily_budget' on PacingData will be set to 0 for
+    non-ENABLED campaigns (dead campaign protection, handled in pacing.py).
     """
     if not campaign_ids:
         return {}
@@ -223,7 +287,11 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
     query = f"""
         SELECT
           campaign.id,
-          metrics.cost_micros
+          campaign.status,
+          campaign.advertising_channel_type,
+          metrics.cost_micros,
+          metrics.clicks,
+          metrics.conversions
         FROM campaign
         WHERE segments.date BETWEEN '{start}' AND '{yesterday}'
           AND campaign.id IN ({id_list})
@@ -231,13 +299,24 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
 
     rows = _gaql(access_token, customer_id, developer_token, query, mcc_customer_id=mcc_customer_id)
 
-    spend = {}
+    result = {}
     for r in rows:
         cid = str(r.get('campaign', {}).get('id', ''))
-        micros = int(r.get('metrics', {}).get('costMicros', 0) or 0)
-        spend[cid] = spend.get(cid, 0.0) + micros / 1_000_000
+        channel_type = (r.get('campaign', {}).get('advertisingChannelType') or '').upper()
+        # Skip phantom channel types (mirrors script's phantom budget fix)
+        if channel_type in _PHANTOM_CHANNEL_TYPES:
+            continue
+        m = r.get('metrics', {})
+        micros = int(m.get('costMicros', 0) or 0)
+        clicks = int(m.get('clicks', 0) or 0)
+        conversions = float(m.get('conversions', 0) or 0)
+        if cid not in result:
+            result[cid] = {'spend': 0.0, 'clicks': 0, 'conversions': 0.0}
+        result[cid]['spend'] += micros / 1_000_000
+        result[cid]['clicks'] += clicks
+        result[cid]['conversions'] += conversions
 
-    return spend
+    return result
 
 
 def get_campaign_daily_spend(refresh_token: str, customer_id: str,

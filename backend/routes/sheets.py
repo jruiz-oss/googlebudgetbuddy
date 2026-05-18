@@ -1265,3 +1265,284 @@ def write_spend(account_id):
         "message": f"Wrote spend for {result['written_count']} campaign(s) to '{result['sheet_tab']}'",
         **result,
     }), 200
+
+
+# ===========================================================================
+# Google Ads sheet section
+# ===========================================================================
+# Mirrors the MCC script's sheet format.  Each row under the "Google Ads"
+# section (or the whole sheet when there is no section header) has:
+#   Col A — Account Name   (matches account.account_name, case-insensitive)
+#   Col B — Campaign Filter  (keyword substring; blank = catch-all "Primary")
+#   Col C — Monthly Budget
+#   Col D — MTD Spend      (written back by BudgetBuddy, was written by script)
+#
+# Composite segmentation:
+#   An account can have multiple rows.  Each row with a non-blank Campaign Filter
+#   tracks campaigns whose name *contains* that keyword.  An empty-filter row is
+#   the "Primary" segment — it implicitly excludes campaigns claimed by the
+#   other filters for that account (same logic as the script).
+# ===========================================================================
+
+_GA_STOP_KEYWORDS = {"meta", "linkedin", "tiktok", "totals", "total"}
+
+
+def _get_google_ads_section(worksheet, account_name: str) -> list:
+    """Return Google Ads budget rows for the given account from the sheet.
+
+    Looks for a 'Google Ads' / 'Google' section header first.  If none is
+    found it treats the whole sheet as Google Ads rows (script-style).
+
+    Returns a list of dicts:
+      { row_index (1-based), account_name (str), campaign_filter (str),
+        monthly_budget (float|None), mtd_spend (float|None) }
+    """
+    all_values = _sheets_retry(worksheet.get_all_values)
+    acct_lower = account_name.strip().lower()
+
+    # Determine row range
+    ga_start = None   # 0-based index of first data row
+    ga_stop = len(all_values)
+
+    for i, row in enumerate(all_values):
+        col_a = (row[0] if row else "").strip().lower()
+        if ga_start is None:
+            if col_a in ("google ads", "google"):
+                ga_start = i + 1  # skip the header row itself
+                continue
+        else:
+            if col_a in _GA_STOP_KEYWORDS:
+                ga_stop = i
+                break
+
+    if ga_start is None:
+        # No "Google Ads" header found — treat the entire sheet as GA rows
+        ga_start = 0
+
+    rows = []
+    for off, raw in enumerate(all_values[ga_start:ga_stop]):
+        r = list(raw) + [""] * (4 - len(raw))
+        r = r[:4]
+        if not any(str(c).strip() for c in r):
+            continue
+        row_acct = r[0].strip().lower()
+        if row_acct != acct_lower:
+            continue
+        budget = _parse_float(r[2])
+        mtd_spend = _parse_float(r[3])
+        rows.append({
+            "row_index": ga_start + off + 1,  # 1-based
+            "account_name": r[0].strip(),
+            "campaign_filter": r[1].strip(),
+            "monthly_budget": budget,
+            "mtd_spend": mtd_spend,
+        })
+
+    return rows
+
+
+def sync_google_ads_budgets_for_account(account_id: int) -> dict:
+    """Read the Google Ads section of the sheet and update campaign budgets + labels.
+
+    For each row matching this account:
+      1. campaign_filter keyword → tag all DB campaigns whose name contains that
+         keyword with budget_label = row's campaign_filter (or "Primary" if blank).
+      2. Set monthly_budget on those campaigns from col C.
+
+    The "Primary" / empty-filter row distributes its budget to all campaigns NOT
+    claimed by a named segment (composite segmentation, mirrors the script).
+
+    Raises ValueError on misconfiguration.
+    """
+    settings = AccountSettings.query.filter_by(account_id=account_id).first()
+    if not settings or not (settings.google_sheet_id or "").strip():
+        raise ValueError("Google Sheet not configured.")
+    account = Account.query.get(account_id)
+    if not account:
+        raise ValueError("Account not found.")
+
+    gc = _get_gspread_client()
+    spreadsheet = _sheets_retry(gc.open_by_key, settings.google_sheet_id)
+    ws, tab_name = _open_month_worksheet(spreadsheet)
+    sheet_rows = _get_google_ads_section(ws, account.account_name)
+
+    if not sheet_rows:
+        return {
+            "sheet_tab": tab_name,
+            "message": f"No rows found for account '{account.account_name}' in the Google Ads section.",
+            "updated": [], "skipped": [],
+        }
+
+    db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+
+    # Collect all named filter keywords so we can identify the "Primary" segment
+    named_filters = [
+        r["campaign_filter"].lower()
+        for r in sheet_rows
+        if r["campaign_filter"].strip()
+    ]
+
+    updated = []
+    skipped = []
+
+    for row in sheet_rows:
+        cf = row["campaign_filter"].strip().lower()
+        label = row["campaign_filter"].strip() or "Primary"
+        budget = row["monthly_budget"]
+        if budget is None:
+            skipped.append({"label": label, "reason": "No budget value in col C"})
+            continue
+
+        if cf:
+            # Named segment: campaigns whose name contains the filter keyword
+            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
+        else:
+            # Primary segment: campaigns NOT claimed by any named filter
+            matched = [
+                c for c in db_campaigns
+                if not any(f in c.campaign_name.lower() for f in named_filters)
+            ]
+
+        if not matched:
+            skipped.append({"label": label, "reason": "No campaigns matched the filter keyword"})
+            continue
+
+        # Distribute budget equally among matched campaigns in this segment
+        per_campaign_budget = round(budget / len(matched), 2)
+        for c in matched:
+            old_budget = c.monthly_budget
+            c.monthly_budget = per_campaign_budget
+            c.budget_label = label
+            c.campaign_filter = row["campaign_filter"].strip() or None
+            updated.append({
+                "campaign_name": c.campaign_name,
+                "label": label,
+                "old_budget": old_budget,
+                "new_budget": per_campaign_budget,
+            })
+
+    db.session.commit()
+    return {
+        "sheet_tab": tab_name,
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+        "updated": updated,
+        "skipped": skipped,
+    }
+
+
+def write_google_ads_spend_for_account(account_id: int) -> dict:
+    """Push MTD spend totals per segment row back to col D of the Google Ads section.
+
+    Mirrors what the script did with updateSpendInSheet().
+    Each sheet row's spend = sum of actual_spend for campaigns in that segment.
+    """
+    settings = AccountSettings.query.filter_by(account_id=account_id).first()
+    if not settings or not (settings.google_sheet_id or "").strip():
+        raise ValueError("Google Sheet not configured.")
+    account = Account.query.get(account_id)
+    if not account:
+        raise ValueError("Account not found.")
+
+    gc = _get_gspread_client()
+    spreadsheet = _sheets_retry(gc.open_by_key, settings.google_sheet_id)
+    ws, tab_name = _open_month_worksheet(spreadsheet)
+    sheet_rows = _get_google_ads_section(ws, account.account_name)
+
+    db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+    named_filters = [
+        r["campaign_filter"].lower()
+        for r in sheet_rows
+        if r["campaign_filter"].strip()
+    ]
+
+    cell_updates = []
+    written = []
+    skipped = []
+
+    for row in sheet_rows:
+        cf = row["campaign_filter"].strip().lower()
+        label = row["campaign_filter"].strip() or "Primary"
+
+        if cf:
+            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
+        else:
+            matched = [
+                c for c in db_campaigns
+                if not any(f in c.campaign_name.lower() for f in named_filters)
+            ]
+
+        if not matched:
+            skipped.append({"label": label, "reason": "No matching campaigns"})
+            continue
+
+        # Sum MTD spend from the latest PacingData for each campaign
+        total_spend = 0.0
+        have_data = False
+        for c in matched:
+            pd_row = (
+                PacingData.query
+                .filter_by(campaign_id=c.id)
+                .order_by(PacingData.date.desc(), PacingData.id.desc())
+                .first()
+            )
+            if pd_row:
+                total_spend += pd_row.actual_spend or 0.0
+                have_data = True
+
+        if not have_data:
+            skipped.append({"label": label, "reason": "No pacing data yet — run pacing first"})
+            continue
+
+        r_idx = row["row_index"]
+        cell_updates.append({"range": f"D{r_idx}", "values": [[round(total_spend, 2)]]})
+        written.append({"label": label, "spend": round(total_spend, 2), "row_index": r_idx})
+
+    if cell_updates:
+        _sheets_retry(ws.batch_update, cell_updates, value_input_option="USER_ENTERED")
+
+    return {
+        "sheet_tab": tab_name,
+        "written_count": len(written),
+        "skipped_count": len(skipped),
+        "written": written,
+        "skipped": skipped,
+    }
+
+
+@sheets_bp.route("/<int:account_id>/sync-google-ads", methods=["POST"])
+@login_required
+def sync_google_ads(account_id):
+    """Read Google Ads section of the sheet → update campaign budgets and segment labels."""
+    if not _user_owns_account(account_id):
+        return jsonify({"error": "Not found"}), 404
+    try:
+        result = sync_google_ads_budgets_for_account(account_id)
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception:
+        logger.exception("sync_google_ads_budgets_for_account failed for account %s", account_id)
+        return jsonify({"error": "Could not sync from Google Sheet."}), 400
+    return jsonify({
+        "message": f"Synced {result['updated_count']} campaign(s) from Google Ads section of '{result['sheet_tab']}'",
+        **result,
+    }), 200
+
+
+@sheets_bp.route("/<int:account_id>/write-google-ads-spend", methods=["POST"])
+@login_required
+def write_google_ads_spend(account_id):
+    """Write MTD spend totals back to col D of the Google Ads section."""
+    if not _user_owns_account(account_id):
+        return jsonify({"error": "Not found"}), 404
+    try:
+        result = write_google_ads_spend_for_account(account_id)
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception:
+        logger.exception("write_google_ads_spend_for_account failed for account %s", account_id)
+        return jsonify({"error": "Could not write to Google Sheet."}), 400
+    return jsonify({
+        "message": f"Wrote spend for {result['written_count']} segment(s) to '{result['sheet_tab']}'",
+        **result,
+    }), 200

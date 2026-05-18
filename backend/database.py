@@ -138,6 +138,12 @@ class Campaign(db.Model):
 
     monthly_budget is pulled from the Google Sheet (source of truth).
     google_campaign_id is the numeric campaign ID from Google Ads.
+
+    budget_label / campaign_filter: composite segmentation (from the MCC script).
+      budget_label   — the human-readable segment name (e.g. "IndyCar", "Brand", "Primary")
+      campaign_filter — the keyword used to group campaigns into this segment
+                        (e.g. "IndyCar" → any campaign whose name contains "IndyCar").
+                        Empty / null means this is the catch-all "Primary" segment.
     """
     __tablename__ = 'campaigns'
 
@@ -153,6 +159,9 @@ class Campaign(db.Model):
     # Google Ads budget resource name, e.g. 'customers/123/campaignBudgets/456'
     # Needed to update the budget via the API.
     budget_resource_name = db.Column(db.String(500), nullable=True)
+    # Segment tracking — mirrors the Google Ads script's campaignFilter concept
+    budget_label = db.Column(db.String(100), nullable=True)    # e.g. "IndyCar", "Brand", "Primary"
+    campaign_filter = db.Column(db.String(100), nullable=True) # keyword that assigns campaigns to this segment
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     pacing_data = db.relationship('PacingData', backref='campaign', lazy=True, cascade='all, delete-orphan')
@@ -191,13 +200,20 @@ class Campaign(db.Model):
             'flight_status': self.flight_status,
             'is_active': self.is_active,
             'budget_resource_name': self.budget_resource_name,
+            'budget_label': self.budget_label,
+            'campaign_filter': self.campaign_filter,
             'created_at': self.created_at.isoformat(),
             'latest_pacing': latest,
         }
 
 
 class PacingData(db.Model):
-    """One pacing snapshot per campaign per run."""
+    """One pacing snapshot per campaign per run.
+
+    clicks / conversions / cpc are populated when the Google Ads API returns
+    them (new pacing runs). They will be NULL for rows written before this
+    feature was added — the UI should treat NULL as 'not available'.
+    """
     __tablename__ = 'pacing_data'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -210,6 +226,10 @@ class PacingData(db.Model):
     recommended_daily_budget = db.Column(db.Float, nullable=True)
     change_percent = db.Column(db.Float, nullable=True)
     status = db.Column(db.String(50))  # ON_PACE, INCREASE, DECREASE
+    # Performance metrics (mirrors the MCC script's campaign_breakdown payload)
+    clicks = db.Column(db.Integer, nullable=True)
+    conversions = db.Column(db.Float, nullable=True)
+    cpc = db.Column(db.Float, nullable=True)
 
     def to_dict(self):
         return {
@@ -223,6 +243,9 @@ class PacingData(db.Model):
             'recommended_daily_budget': round(self.recommended_daily_budget, 2) if self.recommended_daily_budget is not None else None,
             'change_percent': round(self.change_percent, 1) if self.change_percent is not None else None,
             'status': self.status,
+            'clicks': self.clicks,
+            'conversions': round(self.conversions, 1) if self.conversions is not None else None,
+            'cpc': round(self.cpc, 2) if self.cpc is not None else None,
         }
 
 

@@ -164,13 +164,18 @@ def _run_pacing_for_account(account, token, app):
     month_start, _ = _month_bounds(today)
     settings = account.settings
 
+    is_grant_account = 'grant' in account.account_name.lower()
+    if is_grant_account:
+        logger.info('Scheduled pacing: account %s is a Grant account — auto-pause exempt', account.id)
+
     active_campaigns = [c for c in account.campaigns if c.is_active and _campaign_is_active_today(c, today)]
     if not active_campaigns:
         return
 
     campaign_ids = [c.google_campaign_id for c in active_campaigns]
     try:
-        spend_by_id = get_campaign_mtd_spend(
+        # Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
+        metrics_by_id = get_campaign_mtd_spend(
             token.refresh_token,
             account.google_customer_id,
             campaign_ids,
@@ -194,7 +199,12 @@ def _run_pacing_for_account(account, token, app):
 
     processed = 0
     for campaign in active_campaigns:
-        actual_spend = spend_by_id.get(campaign.google_campaign_id, 0.0)
+        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
+        actual_spend = campaign_metrics.get('spend', 0.0)
+        clicks = campaign_metrics.get('clicks', None)
+        conversions = campaign_metrics.get('conversions', None)
+        cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
+
         latest_rows = sorted(
             campaign.pacing_data,
             key=lambda r: (r.date or datetime.min.date(), r.id or 0),
@@ -219,6 +229,9 @@ def _run_pacing_for_account(account, token, app):
             recommended_daily_budget=round(rec, 2),
             change_percent=round(change_pct, 1),
             status=status,
+            clicks=clicks,
+            conversions=round(conversions, 1) if conversions is not None else None,
+            cpc=cpc,
         )
         db.session.add(snap)
         processed += 1
