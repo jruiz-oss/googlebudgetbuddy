@@ -300,7 +300,7 @@ export default function Home() {
       <div className="bb-row-between" style={{ marginBottom: '24px' }}>
         <div>
           <h1 className="bb-page-title">Dashboard</h1>
-          <p className="bb-section-meta">All Google Ads accounts</p>
+          <p className="bb-section-meta">All Google Ads accounts — Commit Agency</p>
         </div>
         <div className="bb-row" style={{ gap: '8px' }}>
           <button className="bb-btn bb-btn-ghost" onClick={load}>
