@@ -230,7 +230,7 @@ export default function Home() {
     try {
       const r = await axios.post('/api/accounts/sync-from-mcc', {});
       const { updated, deleted, campaigns_added, campaigns_updated, message } = r.data;
-      toast.success(message);
+      toast.success(message || 'Sync complete — no changes detected.');
       if (deleted?.length) {
         const noName = deleted.filter(d => d.reason === 'no_real_name');
         const notInMcc = deleted.filter(d => d.reason === 'not_in_mcc');
@@ -321,7 +321,7 @@ export default function Home() {
       <div className="bb-row-between" style={{ marginBottom: '24px' }}>
         <div>
           <h1 className="bb-page-title">Dashboard</h1>
-          <p className="bb-section-meta">All Google Ads accounts — Commit Agency</p>
+          <p className="bb-section-meta">All Google Ads accounts — Commit Agency{!loading && accounts.length > 0 ? ` · ${accounts.length} account${accounts.length === 1 ? '' : 's'}` : ''}</p>
         </div>
         <div className="bb-row" style={{ gap: '8px' }}>
           <button className="bb-btn bb-btn-secondary" onClick={syncFromMcc} disabled={syncing} title="Fix names + remove unknown accounts">

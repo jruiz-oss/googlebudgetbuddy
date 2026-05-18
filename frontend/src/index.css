@@ -137,3 +137,81 @@ body {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+
+/* Toast panel */
+@keyframes bb-toast-in  { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes bb-toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(8px); } }
+
+.bb-toast-panel {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  width: 320px;
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.14);
+  overflow: hidden;
+  animation: bb-toast-in 0.22s ease;
+}
+.bb-toast-panel.is-leaving { animation: bb-toast-out 0.22s ease forwards; }
+
+.bb-toast-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+.bb-toast-panel-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+.bb-toast-panel-close-all {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+}
+.bb-toast-panel-close-all:hover { background: var(--color-border); color: var(--color-text); }
+
+.bb-toast-panel-body { padding: 4px 0; }
+
+.bb-toast-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+}
+.bb-toast-row--divider { border-bottom: 1px solid var(--color-border); }
+
+.bb-toast-row-icon { flex-shrink: 0; margin-top: 1px; }
+.bb-toast-row-body { flex: 1; min-width: 0; }
+.bb-toast-row-title { font-size: 13px; font-weight: 600; color: var(--color-text); margin-bottom: 2px; }
+.bb-toast-row-msg   { font-size: 13px; color: var(--color-text-muted); line-height: 1.4; word-break: break-word; }
+
+.bb-toast-row-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  margin-top: 1px;
+}
+.bb-toast-row-dismiss:hover { background: var(--color-bg); color: var(--color-text); }
