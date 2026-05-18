@@ -241,29 +241,35 @@ def sync_from_mcc():
 
     # Auto-sync campaigns for all surviving accounts — run in parallel so
     # N accounts take ~1× latency instead of N× latency.
+    # IMPORTANT: extract plain strings from ORM objects BEFORE spawning threads —
+    # SQLAlchemy objects can't be accessed outside the Flask app context.
     campaigns_added = campaigns_updated = 0
     if kept_accounts:
         from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 
-        # Fetch live campaigns concurrently; returns (added, updated, [Campaign objects])
-        def _fetch_campaigns(account):
+        refresh_token_str = token.refresh_token  # plain string, safe across threads
+        account_tuples = [
+            (a.id, a.google_customer_id, a.mcc_customer_id)
+            for a in kept_accounts
+        ]
+
+        def _fetch_campaigns(acct_id, customer_id, acct_mcc_id):
             try:
                 live = list_campaigns(
-                    token.refresh_token,
-                    account.google_customer_id,
-                    mcc_customer_id=mcc_id or account.mcc_customer_id,
+                    refresh_token_str,
+                    customer_id,
+                    mcc_customer_id=mcc_id or acct_mcc_id,
                 )
-                return account.id, live, None
+                return acct_id, live
             except GoogleAdsError as e:
-                logger.warning('Campaign fetch failed for account %s: %s', account.id, e)
-                return account.id, [], None
+                logger.warning('Campaign fetch failed for account %s: %s', acct_id, e)
+                return acct_id, []
 
-        account_by_id = {a.id: a for a in kept_accounts}
         live_by_account = {}
         with ThreadPoolExecutor(max_workers=10) as pool:
-            futs = {pool.submit(_fetch_campaigns, a): a for a in kept_accounts}
+            futs = {pool.submit(_fetch_campaigns, *t): t for t in account_tuples}
             for fut in _as_completed(futs):
-                acct_id, live, _ = fut.result()
+                acct_id, live = fut.result()
                 live_by_account[acct_id] = live
 
         # Write to DB (single-threaded to avoid SQLAlchemy session conflicts)
