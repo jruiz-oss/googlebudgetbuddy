@@ -187,13 +187,28 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
 
     if resolve_names:
         # Secondary pass: per-account query for any account missing a name.
-        # Only used for the import modal — skipped for sync to avoid timeouts.
-        for acct in accounts:
-            if not acct['name']:
+        # Run in parallel so N accounts don't take N × latency seconds.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        nameless = [a for a in accounts if not a['name']]
+        if nameless:
+            def _resolve(acct):
                 fetched = _fetch_customer_name(
                     access_token, acct['customer_id'], developer_token, mcc_id
                 )
-                acct['name'] = fetched if fetched else _fmt_customer_id(acct['customer_id'])
+                return acct['customer_id'], fetched if fetched else _fmt_customer_id(acct['customer_id'])
+
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {pool.submit(_resolve, a): a for a in nameless}
+                id_to_name = {}
+                for fut in as_completed(futures):
+                    try:
+                        cid, name = fut.result()
+                        id_to_name[cid] = name
+                    except Exception:
+                        pass
+            for acct in accounts:
+                if not acct['name']:
+                    acct['name'] = id_to_name.get(acct['customer_id'], _fmt_customer_id(acct['customer_id']))
     else:
         # Fast path: just use a formatted ID as fallback for empty names
         for acct in accounts:

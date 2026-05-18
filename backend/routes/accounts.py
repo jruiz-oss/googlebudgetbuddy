@@ -239,12 +239,54 @@ def sync_from_mcc():
 
     db.session.commit()
 
-    # Auto-sync campaigns for all surviving accounts
+    # Auto-sync campaigns for all surviving accounts — run in parallel so
+    # N accounts take ~1× latency instead of N× latency.
     campaigns_added = campaigns_updated = 0
-    for account in kept_accounts:
-        a, u = _sync_all_campaigns_for_account(account, token, mcc_customer_id=mcc_id or None)
-        campaigns_added += a
-        campaigns_updated += u
+    if kept_accounts:
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+
+        # Fetch live campaigns concurrently; returns (added, updated, [Campaign objects])
+        def _fetch_campaigns(account):
+            try:
+                live = list_campaigns(
+                    token.refresh_token,
+                    account.google_customer_id,
+                    mcc_customer_id=mcc_id or account.mcc_customer_id,
+                )
+                return account.id, live, None
+            except GoogleAdsError as e:
+                logger.warning('Campaign fetch failed for account %s: %s', account.id, e)
+                return account.id, [], None
+
+        account_by_id = {a.id: a for a in kept_accounts}
+        live_by_account = {}
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futs = {pool.submit(_fetch_campaigns, a): a for a in kept_accounts}
+            for fut in _as_completed(futs):
+                acct_id, live, _ = fut.result()
+                live_by_account[acct_id] = live
+
+        # Write to DB (single-threaded to avoid SQLAlchemy session conflicts)
+        for acct_id, live in live_by_account.items():
+            account = account_by_id[acct_id]
+            for lc in live:
+                cid = str(lc['campaign_id'])
+                existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
+                if existing:
+                    existing.campaign_name = lc['campaign_name']
+                    existing.budget_resource_name = lc.get('budget_resource_name')
+                    existing.is_active = True
+                    campaigns_updated += 1
+                else:
+                    db.session.add(Campaign(
+                        account_id=acct_id,
+                        campaign_name=lc['campaign_name'],
+                        google_campaign_id=cid,
+                        monthly_budget=0.0,
+                        budget_resource_name=lc.get('budget_resource_name'),
+                        is_active=True,
+                    ))
+                    campaigns_added += 1
 
     if campaigns_added or campaigns_updated:
         db.session.commit()
