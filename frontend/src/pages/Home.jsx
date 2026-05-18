@@ -228,7 +228,7 @@ export default function Home() {
   const syncFromMcc = async () => {
     setSyncing(true);
     try {
-      const r = await axios.post('/api/accounts/sync-from-mcc');
+      const r = await axios.post('/api/accounts/sync-from-mcc', {});
       const { updated, deleted, campaigns_added, campaigns_updated, message } = r.data;
       addToast(message, 'success');
       if (deleted?.length) {
