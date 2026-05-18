@@ -173,6 +173,7 @@ On fresh deployments these are created automatically by `db.create_all()`.
 - `backend/routes/sheets.py`: Added Google Ads preview helper, kept `/api/sheets/<id>/preview` but made it return Google Ads section matches, and added `sync_sheet_budgets_for_account()` / `write_sheet_spend_for_account()` as the primary live entry points.
 - `backend/routes/sheets.py`: Added INFO-level logging around Google Ads row discovery, row-to-campaign matching, skips, and spend writeback so Railway logs can explain why a specific account did or did not sync.
 - `backend/routes/pacing.py`: `POST /api/pacing/<id>/run` now syncs budgets through the Google Ads flow and writes spend back to the sheet after a successful run.
+- `backend/routes/pacing.py` and `backend/app.py`: Added INFO-level pacing start logs that include account name, customer ID, MCC ID, and whether a sheet ID is configured, plus more explicit spend-fetch failure context for Google Ads permission issues.
 - `backend/app.py`: Scheduler now uses the same Google Ads-first sheet sync and spend writeback path as manual pacing.
 - `frontend/src/pages/Settings.jsx`: Fixed sheet preview rendering to read the backend response shape correctly.
 - `frontend/src/pages/AccountDashboard.jsx`: Dashboard totals now refresh immediately after a pacing run, and sheet writeback warnings/successes are surfaced in the UI.

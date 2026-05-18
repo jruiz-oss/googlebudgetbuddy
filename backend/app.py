@@ -165,6 +165,15 @@ def _run_pacing_for_account(account, token, app):
     month_start, _ = _month_bounds(today)
     settings = account.settings
 
+    logger.info(
+        "Scheduled pacing start: account_id=%s account_name=%r customer_id=%r mcc_id=%r has_sheet_id=%s",
+        account.id,
+        account.account_name,
+        account.google_customer_id,
+        account.mcc_customer_id,
+        bool(settings and (settings.google_sheet_id or "").strip()),
+    )
+
     is_grant_account = 'grant' in account.account_name.lower()
     if is_grant_account:
         logger.info('Scheduled pacing: account %s is a Grant account — auto-pause exempt', account.id)
@@ -184,7 +193,14 @@ def _run_pacing_for_account(account, token, app):
             mcc_customer_id=account.mcc_customer_id,
         )
     except GoogleAdsError as e:
-        logger.error('Scheduled spend fetch failed for account %s: %s', account.id, e)
+        logger.error(
+            "Scheduled spend fetch failed: account_id=%s account_name=%r customer_id=%r mcc_id=%r error=%s",
+            account.id,
+            account.account_name,
+            account.google_customer_id,
+            account.mcc_customer_id,
+            e,
+        )
         run = PacingRun(
             account_id=account.id,
             run_type='AUTO',

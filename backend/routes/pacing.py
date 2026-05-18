@@ -115,6 +115,15 @@ def run_pacing(account_id):
         db.session.add(settings)
         db.session.commit()
 
+    logger.info(
+        "Run pacing start: account_id=%s account_name=%r customer_id=%r mcc_id=%r has_sheet_id=%s",
+        account.id,
+        account.account_name,
+        account.google_customer_id,
+        account.mcc_customer_id,
+        bool((settings.google_sheet_id or "").strip()),
+    )
+
     today = datetime.utcnow().date()
     month_start, _ = _month_bounds(today)
 
@@ -125,6 +134,12 @@ def run_pacing(account_id):
         try:
             from routes.sheets import sync_sheet_budgets_for_account
             sheet_sync = sync_sheet_budgets_for_account(account_id)
+            logger.info(
+                "Run pacing sheet sync result: account_id=%s updated=%s skipped=%s",
+                account.id,
+                sheet_sync.get('updated_count'),
+                sheet_sync.get('skipped_count'),
+            )
             db.session.expire_all()  # Reload campaigns after budget sync
             account = Account.query.options(
                 selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
@@ -133,6 +148,13 @@ def run_pacing(account_id):
         except Exception as e:
             logger.warning('Sheet sync failed for account %s: %s', account_id, e)
             sheet_sync = {'error': str(e)}
+    else:
+        logger.warning(
+            "Run pacing skipping sheet sync: account_id=%s account_name=%r reason=%r",
+            account.id,
+            account.account_name,
+            "No google_sheet_id configured",
+        )
 
     # 2. Get active campaigns to pace
     active_campaigns = [c for c in account.campaigns if c.is_active and _campaign_is_active_today(c, today)]
@@ -152,6 +174,13 @@ def run_pacing(account_id):
     # 3. Fetch MTD spend from Google Ads API
     # Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
     campaign_ids = [c.google_campaign_id for c in active_campaigns]
+    logger.info(
+        "Run pacing spend fetch: account_id=%s active_campaigns=%d customer_id=%r mcc_id=%r",
+        account.id,
+        len(campaign_ids),
+        account.google_customer_id,
+        account.mcc_customer_id,
+    )
     try:
         metrics_by_id = get_campaign_mtd_spend(
             token.refresh_token,
@@ -161,8 +190,20 @@ def run_pacing(account_id):
             mcc_customer_id=account.mcc_customer_id,
         )
     except GoogleAdsError as e:
-        logger.error('Spend fetch failed for account %s: %s', account_id, e)
-        return jsonify({'error': f'Google Ads API error: {str(e)}'}), 502
+        logger.error(
+            "Spend fetch failed: account_id=%s account_name=%r customer_id=%r mcc_id=%r error=%s",
+            account.id,
+            account.account_name,
+            account.google_customer_id,
+            account.mcc_customer_id,
+            e,
+        )
+        return jsonify({
+            'error': (
+                f"Google Ads API error for '{account.account_name}' "
+                f"(customer {account.google_customer_id}, MCC {account.mcc_customer_id or 'none'}): {str(e)}"
+            )
+        }), 502
 
     # 4. Compute recommendations and save PacingData snapshots
     recommendations = []
@@ -235,6 +276,12 @@ def run_pacing(account_id):
         try:
             from routes.sheets import write_sheet_spend_for_account
             sheet_write = write_sheet_spend_for_account(account_id)
+            logger.info(
+                "Run pacing sheet write result: account_id=%s written=%s skipped=%s",
+                account.id,
+                sheet_write.get('written_count'),
+                sheet_write.get('skipped_count'),
+            )
         except Exception as e:
             logger.warning('Sheet writeback failed for account %s: %s', account_id, e)
             sheet_write = {'error': str(e)}
