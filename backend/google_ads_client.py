@@ -101,42 +101,56 @@ def _gaql(access_token: str, customer_id: str, developer_token: str,
 # Account / MCC helpers
 # ---------------------------------------------------------------------------
 
-def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str) -> list:
-    """Return all active client accounts under the given MCC.
+def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> list:
+    """Return all accounts accessible to the authenticated user.
 
-    Returns a list of dicts: [{customer_id, name, currency, time_zone}, ...]
+    Uses the listAccessibleCustomers endpoint — no GAQL needed, no MCC ID required.
+    Then fetches the name for each account via a separate call.
+
+    Returns a list of dicts: [{customer_id, name}, ...]
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     access_token = get_access_token(refresh_token)
-    cid = mcc_customer_id.replace('-', '')
 
-    query = """
-        SELECT
-          customer_client.client_customer,
-          customer_client.descriptive_name,
-          customer_client.currency_code,
-          customer_client.time_zone,
-          customer_client.status,
-          customer_client.manager
-        FROM customer_client
-        WHERE customer_client.status = 'ENABLED'
-          AND customer_client.manager = FALSE
-        ORDER BY customer_client.descriptive_name
-    """
+    # Step 1: Get all resource names the user can access
+    url = f'{GOOGLE_ADS_API_BASE}/customers:listAccessibleCustomers'
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'developer-token': developer_token,
+    }
 
-    rows = _gaql(access_token, cid, developer_token, query, mcc_customer_id=cid)
+    resp = requests.get(url, headers=headers, timeout=15)
+    if not resp.ok:
+        raise GoogleAdsError(f'listAccessibleCustomers failed ({resp.status_code}): {resp.text[:300]}')
 
+    resource_names = resp.json().get('resourceNames', [])
+    # resource_names look like ["customers/1234567890", ...]
+    customer_ids = [r.replace('customers/', '') for r in resource_names]
+
+    if not customer_ids:
+        return []
+
+    # Step 2: For each customer, get their name via a simple GAQL query
     accounts = []
-    for r in rows:
-        cc = r.get('customerClient', {})
-        # client_customer is a resource name like 'customers/1234567890'
-        raw_id = cc.get('clientCustomer', '').replace('customers/', '')
-        accounts.append({
-            'customer_id': raw_id,
-            'name': cc.get('descriptiveName', ''),
-            'currency': cc.get('currencyCode', 'USD'),
-            'time_zone': cc.get('timeZone', ''),
-        })
+    mcc_cid = (mcc_customer_id or '').replace('-', '') or None
+
+    for cid in customer_ids:
+        try:
+            query = "SELECT customer.id, customer.descriptive_name, customer.manager FROM customer LIMIT 1"
+            rows = _gaql(access_token, cid, developer_token, query, mcc_customer_id=mcc_cid)
+            if rows:
+                c = rows[0].get('customer', {})
+                accounts.append({
+                    'customer_id': str(c.get('id', cid)),
+                    'name': c.get('descriptiveName', f'Account {cid}'),
+                    'is_manager': c.get('manager', False),
+                })
+        except Exception as e:
+            logger.warning('Could not fetch name for customer %s: %s', cid, e)
+            accounts.append({'customer_id': cid, 'name': f'Account {cid}', 'is_manager': False})
+
+    # Sort by name, put managers at the bottom
+    accounts.sort(key=lambda a: (a.get('is_manager', False), a.get('name', '')))
     return accounts
 
 

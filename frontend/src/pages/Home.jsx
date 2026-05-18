@@ -78,10 +78,10 @@ function ImportMccModal({ onClose, onImported, existingIds }) {
             className="bb-input"
             value={mccId}
             onChange={e => setMccId(e.target.value)}
-            placeholder="MCC Customer ID (e.g. 123-456-7890)"
+            placeholder="MCC ID (optional — leave blank to load all accessible accounts)"
             style={{ flex: 1 }}
           />
-          <button className="bb-btn bb-btn-primary" onClick={fetchAccounts} disabled={loading || !mccId.trim()}>
+          <button className="bb-btn bb-btn-primary" onClick={fetchAccounts} disabled={loading}>
             {loading ? 'Loading…' : 'Load Accounts'}
           </button>
         </div>

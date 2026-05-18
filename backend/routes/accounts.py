@@ -132,11 +132,9 @@ def account_summary(account_id):
 @accounts_bp.route('/mcc/list', methods=['GET'])
 @login_required
 def list_mcc_accounts():
-    """List all client accounts under the user's MCC."""
+    """List all accounts accessible to the authenticated user."""
     import os
     mcc_id = request.args.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')
-    if not mcc_id:
-        return jsonify({'error': 'mcc_id query param or GOOGLE_ADS_MCC_ID env var required'}), 400
 
     user_id = session['user_id']
     token = _get_token_or_401(user_id)
@@ -144,7 +142,7 @@ def list_mcc_accounts():
         return jsonify({'error': 'Google account not connected. Please connect via Settings.'}), 401
 
     try:
-        accounts = list_mcc_child_accounts(token.refresh_token, mcc_id)
+        accounts = list_mcc_child_accounts(token.refresh_token, mcc_id or None)
         return jsonify({'accounts': accounts})
     except GoogleAdsError as e:
         logger.error('MCC list failed: %s', e)
