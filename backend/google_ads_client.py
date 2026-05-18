@@ -132,15 +132,18 @@ def _fmt_customer_id(raw_id: str) -> str:
     return raw_id
 
 
-def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> list:
+def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
+                             resolve_names: bool = True) -> list:
     """Return all active non-manager accounts under the MCC.
 
-    Queries customer_client from the MCC account — same approach as the
-    working Lovable app. Returns [{customer_id, name}, ...]
+    Returns [{customer_id, name}, ...]
 
-    If customer_client.descriptive_name is empty (common for some account
-    types), a secondary per-account query is made to fetch
-    customer.descriptive_name directly. Falls back to a formatted ID.
+    resolve_names=True (default): for accounts whose descriptive_name is empty,
+      make a secondary per-account query to fetch the real name. Use this for
+      the import modal where names must be human-readable.
+    resolve_names=False: skip secondary lookups and return whatever the MCC
+      query gives back immediately. Use this for the sync/reconcile endpoint
+      where only customer IDs matter and speed is critical.
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     mcc_id = (mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
@@ -180,20 +183,22 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None) -> 
             raw_id = str(cc.get('id', ''))
             name = (cc.get('descriptiveName') or '').strip()
             if raw_id:
-                accounts.append({
-                    'customer_id': raw_id,
-                    'name': name,  # may be empty; resolved below
-                })
+                accounts.append({'customer_id': raw_id, 'name': name})
 
-    # Secondary pass: for any account with no descriptive name, query the
-    # account directly for customer.descriptive_name.  We accept the extra
-    # round-trips because the MCC list is typically small (< 100 accounts).
-    for acct in accounts:
-        if not acct['name']:
-            fetched = _fetch_customer_name(
-                access_token, acct['customer_id'], developer_token, mcc_id
-            )
-            acct['name'] = fetched if fetched else _fmt_customer_id(acct['customer_id'])
+    if resolve_names:
+        # Secondary pass: per-account query for any account missing a name.
+        # Only used for the import modal — skipped for sync to avoid timeouts.
+        for acct in accounts:
+            if not acct['name']:
+                fetched = _fetch_customer_name(
+                    access_token, acct['customer_id'], developer_token, mcc_id
+                )
+                acct['name'] = fetched if fetched else _fmt_customer_id(acct['customer_id'])
+    else:
+        # Fast path: just use a formatted ID as fallback for empty names
+        for acct in accounts:
+            if not acct['name']:
+                acct['name'] = _fmt_customer_id(acct['customer_id'])
 
     accounts.sort(key=lambda a: a.get('name', '').lower())
     return accounts

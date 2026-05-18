@@ -152,7 +152,11 @@ def sync_from_mcc():
     mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
 
     try:
-        live_accounts = list_mcc_child_accounts(token.refresh_token, mcc_id or None)
+        # resolve_names=False skips the slow per-account secondary lookups —
+        # for sync we only need IDs and whatever name the MCC returns in one shot.
+        live_accounts = list_mcc_child_accounts(
+            token.refresh_token, mcc_id or None, resolve_names=False
+        )
     except GoogleAdsError as e:
         return jsonify({'error': str(e)}), 502
 
