@@ -21,7 +21,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_ADS_API_VERSION = 'v19'
+GOOGLE_ADS_API_VERSION = 'v23'
 GOOGLE_ADS_API_BASE = f'https://googleads.googleapis.com/{GOOGLE_ADS_API_VERSION}'
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
