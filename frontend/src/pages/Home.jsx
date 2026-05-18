@@ -218,6 +218,8 @@ export default function Home() {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [sharedSheetId, setSharedSheetId] = useState('');
+  const [applyingSharedSheet, setApplyingSharedSheet] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [showMcc, setShowMcc] = useState(false);
   // Inline rename state: { accountId: { editing: bool, value: string, saving: bool } }
@@ -280,6 +282,15 @@ export default function Home() {
       const loaded = r.data.accounts || [];
       setAccounts(loaded);
 
+      const uniqueSheetIds = [...new Set(
+        loaded
+          .map(a => a.settings?.google_sheet_id)
+          .filter(Boolean)
+      )];
+      if (uniqueSheetIds.length === 1) {
+        setSharedSheetId(uniqueSheetIds[0]);
+      }
+
       // Silently refresh any accounts whose name looks like a placeholder ID
       const hasPlaceholders = loaded.some(a => {
         const n = (a.account_name || '').trim();
@@ -298,6 +309,27 @@ export default function Home() {
       toast.error('Failed to load accounts');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const applySheetToAll = async () => {
+    if (!sharedSheetId.trim()) {
+      toast.warn('Enter a Google Sheet ID first');
+      return;
+    }
+
+    setApplyingSharedSheet(true);
+    try {
+      const r = await axios.post('/api/settings/apply-sheet-to-all', {
+        google_sheet_id: sharedSheetId.trim(),
+      });
+      setSharedSheetId(r.data.google_sheet_id || sharedSheetId.trim());
+      toast.success(r.data.message || 'Applied sheet to all accounts');
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to apply sheet to all accounts');
+    } finally {
+      setApplyingSharedSheet(false);
     }
   };
 
@@ -354,6 +386,32 @@ export default function Home() {
           <div className="bb-card">
             <p className="bb-section-meta">Need Attention</p>
             <p className="bb-stat-value" style={{ color: 'var(--color-danger)' }}>{paceCount.increase + paceCount.decrease}</p>
+          </div>
+        </div>
+      )}
+
+      {!loading && accounts.length > 0 && (
+        <div className="bb-card" style={{ marginBottom: '24px' }}>
+          <div className="bb-row-between" style={{ gap: '16px', alignItems: 'end', flexWrap: 'wrap' }}>
+            <div style={{ flex: 1, minWidth: '280px' }}>
+              <h2 className="bb-section-title">Shared Google Sheet</h2>
+              <p className="bb-muted" style={{ marginBottom: '12px' }}>
+                All accounts use the same pacing sheet. Paste it here once and apply it to every account.
+              </p>
+              <input
+                className="bb-input"
+                value={sharedSheetId}
+                onChange={e => setSharedSheetId(e.target.value)}
+                placeholder="Paste the Google Sheet ID or full URL"
+              />
+            </div>
+            <button
+              className="bb-btn bb-btn-primary"
+              onClick={applySheetToAll}
+              disabled={applyingSharedSheet || !accounts.length}
+            >
+              {applyingSharedSheet ? 'Applying…' : `Apply to ${accounts.length} Account${accounts.length === 1 ? '' : 's'}`}
+            </button>
           </div>
         </div>
       )}
