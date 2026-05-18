@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2 } from 'lucide-react';
+import { Plus, RefreshCw, TrendingUp, TrendingDown, Minus, Settings, History, Download, Trash2, CloudDownload } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 import { SkeletonAccountBlock } from '../components/Skeleton';
@@ -14,6 +14,110 @@ function StatusPill({ status }) {
   };
   const { cls, icon, label } = map[status] || map.on_track;
   return <span className={`bb-pill ${cls}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>{icon}{label}</span>;
+}
+
+function ImportMccModal({ onClose, onImported, existingIds }) {
+  const [accounts, setAccounts] = useState([]);
+  const [selected, setSelected] = useState(new Set());
+  const [mccId, setMccId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState('');
+
+  const fetchAccounts = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const r = await axios.get('/api/accounts/mcc/list', { params: { mcc_id: mccId.replace(/-/g, '') } });
+      const all = r.data.accounts || [];
+      // Pre-select accounts not already in the app
+      const newOnes = new Set(all.filter(a => !existingIds.has(a.customer_id)).map(a => a.customer_id));
+      setAccounts(all);
+      setSelected(newOnes);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Failed to load accounts from MCC');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggle = (id) => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSelected(selected.size === accounts.length ? new Set() : new Set(accounts.map(a => a.customer_id)));
+
+  const handleImport = async () => {
+    if (!selected.size) return;
+    setImporting(true);
+    const toImport = accounts.filter(a => selected.has(a.customer_id));
+    let added = 0;
+    for (const acct of toImport) {
+      try {
+        await axios.post('/api/accounts', {
+          account_name: acct.name,
+          google_customer_id: acct.customer_id,
+          mcc_customer_id: mccId.replace(/-/g, '') || null,
+        });
+        added++;
+      } catch { /* skip duplicates */ }
+    }
+    setImporting(false);
+    onImported(added);
+  };
+
+  return (
+    <div className="bb-modal-overlay" onClick={onClose}>
+      <div className="bb-modal" style={{ maxWidth: '580px' }} onClick={e => e.stopPropagation()}>
+        <div className="bb-modal-header">
+          <h2 className="bb-section-title">Import All Accounts from MCC</h2>
+          <button className="bb-btn bb-btn-ghost" onClick={onClose}>✕</button>
+        </div>
+
+        {error && <div className="bb-alert bb-alert-error">{error}</div>}
+
+        <div className="bb-row" style={{ gap: '8px', marginBottom: '16px' }}>
+          <input
+            className="bb-input"
+            value={mccId}
+            onChange={e => setMccId(e.target.value)}
+            placeholder="MCC Customer ID (e.g. 123-456-7890)"
+            style={{ flex: 1 }}
+          />
+          <button className="bb-btn bb-btn-primary" onClick={fetchAccounts} disabled={loading || !mccId.trim()}>
+            {loading ? 'Loading…' : 'Load Accounts'}
+          </button>
+        </div>
+
+        {accounts.length > 0 && (
+          <>
+            <div className="bb-row-between" style={{ marginBottom: '8px' }}>
+              <span className="bb-muted" style={{ fontSize: '13px' }}>{accounts.length} account(s) found · {selected.size} selected</span>
+              <button className="bb-btn bb-btn-ghost" style={{ fontSize: '13px', padding: '4px 8px' }} onClick={toggleAll}>
+                {selected.size === accounts.length ? 'Deselect all' : 'Select all'}
+              </button>
+            </div>
+            <div style={{ maxHeight: '340px', overflowY: 'auto', border: '1px solid var(--color-border)', borderRadius: '8px', marginBottom: '16px' }}>
+              {accounts.map(a => {
+                const alreadyExists = existingIds.has(a.customer_id);
+                return (
+                  <label key={a.customer_id} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 14px', borderBottom: '1px solid var(--color-border)', cursor: alreadyExists ? 'default' : 'pointer', opacity: alreadyExists ? 0.5 : 1 }}>
+                    <input type="checkbox" checked={selected.has(a.customer_id)} onChange={() => !alreadyExists && toggle(a.customer_id)} disabled={alreadyExists} />
+                    <span style={{ flex: 1, fontWeight: 500 }}>{a.name}</span>
+                    <span className="bb-muted" style={{ fontSize: '12px' }}>{a.customer_id}</span>
+                    {alreadyExists && <span className="bb-pill bb-pill-on" style={{ fontSize: '11px' }}>Already added</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="bb-row" style={{ justifyContent: 'flex-end', gap: '8px' }}>
+              <button className="bb-btn bb-btn-secondary" onClick={onClose}>Cancel</button>
+              <button className="bb-btn bb-btn-primary" onClick={handleImport} disabled={!selected.size || importing}>
+                {importing ? 'Importing…' : `Import ${selected.size} account(s)`}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function AddAccountModal({ onClose, onAdded }) {
@@ -78,6 +182,7 @@ export default function Home() {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [showMcc, setShowMcc] = useState(false);
   const navigate = useNavigate();
   const { addToast } = useToast();
 
@@ -118,6 +223,9 @@ export default function Home() {
         <div className="bb-row" style={{ gap: '8px' }}>
           <button className="bb-btn bb-btn-ghost" onClick={load}>
             <RefreshCw size={16} /> Refresh
+          </button>
+          <button className="bb-btn bb-btn-secondary" onClick={() => setShowMcc(true)}>
+            <CloudDownload size={16} /> Import from MCC
           </button>
           <button className="bb-btn bb-btn-primary" onClick={() => setShowAdd(true)}>
             <Plus size={16} /> Add Account
@@ -249,6 +357,14 @@ export default function Home() {
         <AddAccountModal
           onClose={() => setShowAdd(false)}
           onAdded={() => { setShowAdd(false); load(); addToast('Account added', 'success'); }}
+        />
+      )}
+
+      {showMcc && (
+        <ImportMccModal
+          onClose={() => setShowMcc(false)}
+          existingIds={new Set(accounts.map(a => a.google_customer_id))}
+          onImported={(count) => { setShowMcc(false); load(); addToast(`Imported ${count} account(s)`, 'success'); }}
         />
       )}
     </div>
