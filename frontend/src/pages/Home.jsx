@@ -223,23 +223,23 @@ export default function Home() {
   // Inline rename state: { accountId: { editing: bool, value: string, saving: bool } }
   const [renameState, setRenameState] = useState({});
   const navigate = useNavigate();
-  const { addToast } = useToast();
+  const toast = useToast();
 
   const syncFromMcc = async () => {
     setSyncing(true);
     try {
       const r = await axios.post('/api/accounts/sync-from-mcc', {});
       const { updated, deleted, campaigns_added, campaigns_updated, message } = r.data;
-      addToast(message, 'success');
+      toast.success(message);
       if (deleted?.length) {
         const noName = deleted.filter(d => d.reason === 'no_real_name');
         const notInMcc = deleted.filter(d => d.reason === 'not_in_mcc');
-        noName.forEach(d => addToast(`Removed nameless account: ${d.customer_id}`, 'info'));
-        notInMcc.forEach(d => addToast(`Removed unknown account: ${d.name || d.customer_id}`, 'info'));
+        noName.forEach(d => toast.info(`Removed nameless account: ${d.customer_id}`));
+        notInMcc.forEach(d => toast.info(`Removed unknown account: ${d.name || d.customer_id}`));
       }
       load();
     } catch (e) {
-      addToast(e.response?.data?.error || 'Sync failed', 'error');
+      toast.error(e.response?.data?.error || 'Sync failed');
     } finally {
       setSyncing(false);
     }
@@ -264,11 +264,11 @@ export default function Home() {
     setRenameState(s => ({ ...s, [account.id]: { ...s[account.id], saving: true } }));
     try {
       await axios.put(`/api/accounts/${account.id}`, { account_name: newName });
-      addToast('Account renamed', 'success');
+      toast.success('Account renamed');
       cancelRename(account.id);
       load();
     } catch {
-      addToast('Rename failed', 'error');
+      toast.error('Rename failed');
       setRenameState(s => ({ ...s, [account.id]: { ...s[account.id], saving: false } }));
     }
   };
@@ -295,7 +295,7 @@ export default function Home() {
         }).catch(() => {}); // silent — don't block the UI
       }
     } catch {
-      addToast('Failed to load accounts', 'error');
+      toast.error('Failed to load accounts');
     } finally {
       setLoading(false);
     }
@@ -426,10 +426,10 @@ export default function Home() {
                         if (!confirm(`Delete "${account.account_name}"? This cannot be undone.`)) return;
                         try {
                           await axios.delete(`/api/accounts/${account.id}`);
-                          addToast(`"${account.account_name}" deleted`, 'info');
+                          toast.info(`"${account.account_name}" deleted`);
                           load();
                         } catch {
-                          addToast('Delete failed', 'error');
+                          toast.error('Delete failed');
                         }
                       }}
                     >
@@ -488,7 +488,7 @@ export default function Home() {
       {showAdd && (
         <AddAccountModal
           onClose={() => setShowAdd(false)}
-          onAdded={() => { setShowAdd(false); load(); addToast('Account added', 'success'); }}
+          onAdded={() => { setShowAdd(false); load(); toast.success('Account added'); }}
         />
       )}
 
@@ -496,7 +496,7 @@ export default function Home() {
         <ImportMccModal
           onClose={() => setShowMcc(false)}
           existingIds={new Set(accounts.map(a => a.google_customer_id))}
-          onImported={(count) => { setShowMcc(false); load(); addToast(`Imported ${count} account(s)`, 'success'); }}
+          onImported={(count) => { setShowMcc(false); load(); toast.success(`Imported ${count} account(s)`); }}
         />
       )}
     </div>
