@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Play, Check, TrendingUp, TrendingDown, Minus, Settings, History, Download, Plus, RefreshCw, PauseCircle } from 'lucide-react';
+import { Play, Check, TrendingUp, TrendingDown, Minus, Settings, History, Download, Plus, RefreshCw, PauseCircle, Zap } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 import { SkeletonTable } from '../components/Skeleton';
@@ -100,6 +100,8 @@ export default function AccountDashboard() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupStatus, setSetupStatus] = useState('');
   const [selected, setSelected] = useState(new Set());
   const [showImport, setShowImport] = useState(false);
   const [sheetSync, setSheetSync] = useState(null);
@@ -151,6 +153,52 @@ export default function AccountDashboard() {
       addToast(e.response?.data?.error || 'Pacing run failed', 'error');
     } finally {
       setRunning(false);
+    }
+  };
+
+  // One-click setup: fetch all campaigns from Google Ads, import them all,
+  // then immediately run pacing so data appears straight away.
+  const quickSetup = async () => {
+    setSettingUp(true);
+    setSetupStatus('Fetching campaigns from Google Ads…');
+    try {
+      // 1. Get live campaigns
+      const liveR = await axios.get(`/api/accounts/${id}/sync-campaigns`);
+      const live = liveR.data.campaigns || [];
+      if (!live.length) {
+        addToast('No campaigns found in Google Ads for this account', 'warn');
+        setSettingUp(false);
+        setSetupStatus('');
+        return;
+      }
+
+      // 2. Import all of them
+      setSetupStatus(`Importing ${live.length} campaign(s)…`);
+      await axios.post(`/api/accounts/${id}/sync-campaigns`, {
+        campaign_ids: live.map(c => c.campaign_id),
+      });
+
+      // 3. Run pacing immediately
+      setSetupStatus('Running pacing…');
+      const pacingR = await axios.post(`/api/pacing/${id}/run`);
+      setRecommendations(pacingR.data.recommendations || []);
+      setSummary(pacingR.data.summary);
+      setSheetSync(pacingR.data.sheet_sync);
+      setPauseWarning(pacingR.data.auto_pause_warning);
+      const toSelect = new Set(
+        (pacingR.data.recommendations || [])
+          .filter(rec => rec.status !== 'ON_PACE')
+          .map(rec => rec.campaign_id)
+      );
+      setSelected(toSelect);
+
+      addToast(`Set up ${live.length} campaign(s) and ran pacing`, 'success');
+      load();
+    } catch (e) {
+      addToast(e.response?.data?.error || 'Setup failed', 'error');
+    } finally {
+      setSettingUp(false);
+      setSetupStatus('');
     }
   };
 
@@ -335,12 +383,29 @@ export default function AccountDashboard() {
         </div>
 
         {activeCampaigns.length === 0 ? (
-          <EmptyState
-            icon={<Plus size={28} />}
-            title="No campaigns tracked"
-            body="Import campaigns from Google Ads to start pacing them."
-            action={{ label: 'Import Campaigns', onClick: () => setShowImport(true) }}
-          />
+          <div style={{ textAlign: 'center', padding: '40px 24px' }}>
+            <div style={{ marginBottom: '16px', color: 'var(--color-text-muted)' }}>
+              <Zap size={36} />
+            </div>
+            <h3 style={{ marginBottom: '8px', fontSize: '16px', fontWeight: 600 }}>No campaigns tracked yet</h3>
+            <p className="bb-muted" style={{ marginBottom: '24px', maxWidth: '380px', margin: '0 auto 24px' }}>
+              Pull all campaigns from Google Ads and run your first pacing check in one click.
+            </p>
+            <div className="bb-row" style={{ justifyContent: 'center', gap: '10px' }}>
+              <button
+                className="bb-btn bb-btn-primary"
+                onClick={quickSetup}
+                disabled={settingUp}
+                style={{ fontSize: '15px', padding: '10px 24px' }}
+              >
+                <Zap size={16} />
+                {settingUp ? setupStatus || 'Setting up…' : 'Set Up This Account'}
+              </button>
+              <button className="bb-btn bb-btn-secondary" onClick={() => setShowImport(true)} disabled={settingUp}>
+                <Plus size={15} /> Pick manually
+              </button>
+            </div>
+          </div>
         ) : (
           <table className="bb-table" style={{ width: '100%' }}>
             <thead>

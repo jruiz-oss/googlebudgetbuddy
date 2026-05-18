@@ -256,7 +256,23 @@ export default function Home() {
     setLoading(true);
     try {
       const r = await axios.get('/api/campaigns/all');
-      setAccounts(r.data.accounts || []);
+      const loaded = r.data.accounts || [];
+      setAccounts(loaded);
+
+      // Silently refresh any accounts whose name looks like a placeholder ID
+      const hasPlaceholders = loaded.some(a => {
+        const n = (a.account_name || '').trim();
+        return (
+          /^\d+$/.test(n) ||
+          n.toLowerCase().startsWith('account ') ||
+          n.replace(/-/g, '') === (a.google_customer_id || '').replace(/-/g, '')
+        );
+      });
+      if (hasPlaceholders) {
+        axios.post('/api/accounts/refresh-names').then(res => {
+          if (res.data.refreshed > 0) load(); // reload with real names
+        }).catch(() => {}); // silent — don't block the UI
+      }
     } catch {
       addToast('Failed to load accounts', 'error');
     } finally {

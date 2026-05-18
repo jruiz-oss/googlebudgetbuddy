@@ -11,7 +11,10 @@ from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
 
 from database import Account, AccountSettings, Campaign, GoogleOAuthToken, db
-from google_ads_client import GoogleAdsError, list_mcc_child_accounts, list_campaigns
+from google_ads_client import (
+    GoogleAdsError, list_mcc_child_accounts, list_campaigns,
+    _fetch_customer_name, _fmt_customer_id, get_access_token,
+)
 from routes.auth import login_required
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,76 @@ def account_summary(account_id):
     )
     _ensure_settings(account)
     return jsonify({'account': account.to_dict()})
+
+
+# ---------------------------------------------------------------------------
+# Bulk name refresh
+# ---------------------------------------------------------------------------
+
+def _name_looks_like_placeholder(name: str, customer_id: str) -> bool:
+    """Return True if the account name looks like an auto-generated placeholder."""
+    if not name:
+        return True
+    stripped = name.strip()
+    # Pure digits (e.g. "1234567890")
+    if stripped.isdigit():
+        return True
+    # "Account XXXXXXXX" fallback
+    if stripped.lower().startswith('account ') and stripped[8:].replace('-', '').isdigit():
+        return True
+    # Formatted customer ID (e.g. "123-456-7890")
+    if stripped.replace('-', '') == (customer_id or '').replace('-', ''):
+        return True
+    return False
+
+
+@accounts_bp.route('/refresh-names', methods=['POST'])
+@login_required
+def refresh_account_names():
+    """For every account with a placeholder name, fetch the real name from Google Ads.
+
+    Called automatically by the Home page on mount when suspicious names are
+    detected. Silently skips accounts if no OAuth token is available.
+    """
+    import os
+    user_id = session['user_id']
+    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
+    if not token:
+        return jsonify({'refreshed': 0, 'message': 'No Google account connected — skipped'}), 200
+
+    developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
+    mcc_id = os.environ.get('GOOGLE_ADS_MCC_ID', '').replace('-', '')
+
+    try:
+        access_token = get_access_token(token.refresh_token)
+    except Exception as e:
+        return jsonify({'refreshed': 0, 'message': f'Token refresh failed: {e}'}), 200
+
+    accounts = Account.query.all()
+    refreshed = []
+
+    for account in accounts:
+        if not _name_looks_like_placeholder(account.account_name, account.google_customer_id):
+            continue
+        try:
+            real_name = _fetch_customer_name(
+                access_token,
+                account.google_customer_id,
+                developer_token,
+                mcc_id,
+            )
+            if real_name and not _name_looks_like_placeholder(real_name, account.google_customer_id):
+                old = account.account_name
+                account.account_name = real_name
+                refreshed.append({'id': account.id, 'old': old, 'new': real_name})
+                logger.info('Refreshed name: %s → %s', old, real_name)
+        except Exception as e:
+            logger.warning('Name refresh failed for account %s: %s', account.id, e)
+
+    if refreshed:
+        db.session.commit()
+
+    return jsonify({'refreshed': len(refreshed), 'updated': refreshed}), 200
 
 
 # ---------------------------------------------------------------------------
