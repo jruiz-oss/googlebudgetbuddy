@@ -274,7 +274,6 @@ def sync_from_mcc():
 
         # Write to DB (single-threaded to avoid SQLAlchemy session conflicts)
         for acct_id, live in live_by_account.items():
-            account = account_by_id[acct_id]
             for lc in live:
                 cid = str(lc['campaign_id'])
                 existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
