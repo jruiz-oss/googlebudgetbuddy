@@ -132,13 +132,53 @@ def account_summary(account_id):
 # Global MCC sync — reconcile DB against live MCC
 # ---------------------------------------------------------------------------
 
+def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
+    """Upsert all live campaigns from Google Ads for a single account.
+
+    Returns (added, updated) counts. Skips silently if the API call fails.
+    """
+    try:
+        live = list_campaigns(
+            token.refresh_token,
+            account.google_customer_id,
+            mcc_customer_id=mcc_customer_id or account.mcc_customer_id,
+        )
+    except GoogleAdsError as e:
+        logger.warning('Campaign sync failed for account %s (%s): %s', account.id, account.google_customer_id, e)
+        return 0, 0
+
+    added = updated = 0
+    for lc in live:
+        cid = str(lc['campaign_id'])
+        existing = Campaign.query.filter_by(account_id=account.id, google_campaign_id=cid).first()
+        if existing:
+            existing.campaign_name = lc['campaign_name']
+            existing.budget_resource_name = lc.get('budget_resource_name')
+            existing.is_active = True
+            updated += 1
+        else:
+            db.session.add(Campaign(
+                account_id=account.id,
+                campaign_name=lc['campaign_name'],
+                google_campaign_id=cid,
+                monthly_budget=0.0,
+                budget_resource_name=lc.get('budget_resource_name'),
+                is_active=True,
+            ))
+            added += 1
+    return added, updated
+
+
 @accounts_bp.route('/sync-from-mcc', methods=['POST'])
 @login_required
 def sync_from_mcc():
     """One-button reconcile: pull the live MCC account list and:
-      - Update names for accounts that exist in both DB and MCC
+      - Try to resolve real names for all accounts (resolve_names=True)
+      - Update names for accounts found in the MCC with a real name
       - Delete DB accounts whose customer ID is not in the MCC at all
-      - (Does NOT add new accounts — use Import MCC modal for that)
+      - Delete DB accounts that are in the MCC but still have placeholder names
+        after resolution (so nameless/ID-only accounts are cleaned up)
+      - Auto-sync all campaigns for every remaining account
 
     Body (optional): { "mcc_id": "123-456-7890" }
     """
@@ -152,10 +192,10 @@ def sync_from_mcc():
     mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
 
     try:
-        # resolve_names=False skips the slow per-account secondary lookups —
-        # for sync we only need IDs and whatever name the MCC returns in one shot.
+        # resolve_names=True does a secondary per-account GAQL lookup for any
+        # account whose descriptive_name comes back empty from the MCC batch call.
         live_accounts = list_mcc_child_accounts(
-            token.refresh_token, mcc_id or None, resolve_names=False
+            token.refresh_token, mcc_id or None, resolve_names=True
         )
     except GoogleAdsError as e:
         return jsonify({'error': str(e)}), 502
@@ -167,26 +207,58 @@ def sync_from_mcc():
 
     updated = []
     deleted = []
+    kept_accounts = []
 
     for account in db_accounts:
         cid = (account.google_customer_id or '').replace('-', '')
-        if cid in live_by_id:
-            real_name = live_by_id[cid]
-            if real_name and real_name != account.account_name:
+        if cid not in live_by_id:
+            # Not in MCC at all → remove
+            deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'not_in_mcc'})
+            db.session.delete(account)
+            continue
+
+        real_name = live_by_id[cid]
+        name_is_real = real_name and not _name_looks_like_placeholder(real_name, cid)
+
+        if name_is_real:
+            # Got a good name — update if different
+            if real_name != account.account_name:
                 old = account.account_name
                 account.account_name = real_name
                 updated.append({'id': account.id, 'customer_id': cid, 'old': old, 'new': real_name})
+            kept_accounts.append(account)
         else:
-            deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name})
-            db.session.delete(account)
+            # Still a placeholder name after resolution
+            if _name_looks_like_placeholder(account.account_name, cid):
+                # DB name is also a placeholder → no real name anywhere, remove it
+                deleted.append({'id': account.id, 'customer_id': cid, 'name': account.account_name, 'reason': 'no_real_name'})
+                db.session.delete(account)
+            else:
+                # DB already has a real name the user set manually — keep it
+                kept_accounts.append(account)
 
     db.session.commit()
 
+    # Auto-sync campaigns for all surviving accounts
+    campaigns_added = campaigns_updated = 0
+    for account in kept_accounts:
+        a, u = _sync_all_campaigns_for_account(account, token, mcc_customer_id=mcc_id or None)
+        campaigns_added += a
+        campaigns_updated += u
+
+    if campaigns_added or campaigns_updated:
+        db.session.commit()
+
     return jsonify({
-        'message': f'Updated {len(updated)} name(s), removed {len(deleted)} unknown account(s).',
+        'message': (
+            f'Updated {len(updated)} name(s), removed {len(deleted)} account(s). '
+            f'Campaigns: {campaigns_added} added, {campaigns_updated} updated.'
+        ),
         'updated': updated,
         'deleted': deleted,
         'live_account_count': len(live_accounts),
+        'campaigns_added': campaigns_added,
+        'campaigns_updated': campaigns_updated,
     }), 200
 
 

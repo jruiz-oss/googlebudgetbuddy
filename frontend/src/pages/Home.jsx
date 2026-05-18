@@ -229,10 +229,13 @@ export default function Home() {
     setSyncing(true);
     try {
       const r = await axios.post('/api/accounts/sync-from-mcc');
-      const { updated, deleted, message } = r.data;
+      const { updated, deleted, campaigns_added, campaigns_updated, message } = r.data;
       addToast(message, 'success');
       if (deleted?.length) {
-        deleted.forEach(d => addToast(`Removed unknown account: ${d.name || d.customer_id}`, 'info'));
+        const noName = deleted.filter(d => d.reason === 'no_real_name');
+        const notInMcc = deleted.filter(d => d.reason === 'not_in_mcc');
+        noName.forEach(d => addToast(`Removed nameless account: ${d.customer_id}`, 'info'));
+        notInMcc.forEach(d => addToast(`Removed unknown account: ${d.name || d.customer_id}`, 'info'));
       }
       load();
     } catch (e) {
