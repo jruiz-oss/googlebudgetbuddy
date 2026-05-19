@@ -285,7 +285,16 @@ export default function AccountDashboard() {
   });
 
   const activeCampaigns = campaigns.filter(c => c.is_active !== false);
-  const totalBudget = activeCampaigns.reduce((s, c) => s + (c.monthly_budget || 0), 0);
+  // Sum one budget per segment — each campaign in a segment carries the full
+  // segment budget, so we must not add them together across campaigns.
+  const totalBudget = (() => {
+    const seen = {};
+    for (const c of activeCampaigns) {
+      const label = c.budget_label || 'Primary';
+      seen[label] = c.monthly_budget || 0;
+    }
+    return Object.values(seen).reduce((s, b) => s + b, 0);
+  })();
   const totalSpend = activeCampaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
   const spendPct = totalBudget > 0 ? (totalSpend / totalBudget * 100) : 0;
   const hasSheetId = Boolean(account?.settings?.google_sheet_id);
@@ -407,7 +416,9 @@ export default function AccountDashboard() {
               </thead>
               <tbody>
                 {[...segMap.entries()].map(([label, recs]) => {
-                  const segBudget = recs.reduce((s, r) => s + (r.monthly_budget || 0), 0);
+                  // All campaigns in a segment share the same budget — take it from
+                  // the first entry rather than summing (which would multiply it).
+                  const segBudget = recs[0]?.monthly_budget || 0;
                   const segSpend  = recs.reduce((s, r) => s + (r.actual_spend  || 0), 0);
                   const segPct    = segBudget > 0 ? (segSpend / segBudget * 100).toFixed(1) : '—';
                   return [
@@ -512,7 +523,9 @@ export default function AccountDashboard() {
               </thead>
               <tbody>
                 {[...segMap.entries()].map(([label, camps]) => {
-                  const segBudget = camps.reduce((s, c) => s + (c.monthly_budget || 0), 0);
+                  // All campaigns in a segment share the same budget — take it from
+                  // the first entry rather than summing (which would multiply it).
+                  const segBudget = camps[0]?.monthly_budget || 0;
                   const segSpend  = camps.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
                   const segPct    = segBudget > 0 ? (segSpend / segBudget * 100).toFixed(1) : '—';
                   return [
