@@ -66,16 +66,34 @@ def latest_pacing_date(campaigns):
 def visible_latest_campaigns(campaigns):
     """Campaigns visible to dashboards: live campaigns plus latest-run spenders.
 
-    Live $0 campaigns should still be visible on account dashboards so their
-    current daily budgets and segment membership can be inspected. Inactive
-    campaigns remain visible only when the latest pacing run shows MTD spend.
+    Excluded (zombie campaigns):
+    - google_end_date is set AND end_date < start of current month AND no spend this month.
+      These are campaigns that ended in a prior month and ran up no spend this month.
+      Google Ads frequently leaves such campaigns ENABLED indefinitely; relying on is_active
+      alone lets them pollute dashboards and segment totals.
+
+    Included:
+    - Active (is_active=True) campaigns that are not zombies (no end_date, or ended this month).
+    - Any campaign (active or not) that has spend recorded in the latest pacing run.
+      This covers campaigns that ended mid-month but did spend before ending.
     """
     canonical = canonical_campaigns(campaigns)
     latest_date = latest_pacing_date(canonical)
+    month_start = date.today().replace(day=1)
     visible = []
     for campaign in canonical:
         latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
-        if campaign.is_active or (latest and (latest.actual_spend or 0) > 0):
+        has_spend_latest = latest and (latest.actual_spend or 0) > 0
+
+        # Zombie check: ended before this month AND no spend this month
+        ended_before_month = (
+            campaign.google_end_date is not None
+            and campaign.google_end_date < month_start
+        )
+        if ended_before_month and not campaign.has_spend_this_month():
+            continue  # skip zombie
+
+        if campaign.is_active or has_spend_latest:
             visible.append(campaign)
     return visible
 
@@ -317,6 +335,9 @@ class Campaign(db.Model):
     # Needed to update the budget via the API.
     budget_resource_name = db.Column(db.String(500), nullable=True)
     current_daily_budget = db.Column(db.Float, nullable=True)
+    # Google Ads campaign end_date — stored so we can detect campaigns that ended before
+    # the current month without re-querying the API. NULL means no end date (always-on).
+    google_end_date = db.Column(db.Date, nullable=True)
     # Segment tracking — mirrors the Google Ads script's campaignFilter concept
     budget_label = db.Column(db.String(100), nullable=True)    # e.g. "IndyCar", "Brand", "Primary"
     campaign_filter = db.Column(db.String(100), nullable=True) # keyword that assigns campaigns to this segment
@@ -379,6 +400,7 @@ class Campaign(db.Model):
             'flight_end_date': self.flight_end_date.isoformat() if self.flight_end_date else None,
             'flight_status': self.flight_status,
             'is_active': self.is_active,
+            'google_end_date': self.google_end_date.isoformat() if self.google_end_date else None,
             'budget_resource_name': self.budget_resource_name,
             'current_daily_budget': round(self.current_daily_budget, 2) if self.current_daily_budget is not None else None,
             'budget_label': self.budget_label,

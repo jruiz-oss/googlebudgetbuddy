@@ -179,12 +179,40 @@ def _delete_today_pacing_data(campaigns, today):
     return deleted
 
 
+def _is_zombie_campaign(campaign, today, api_spend):
+    """True if this campaign ended before the current month and has no spend this month.
+
+    Google Ads often leaves campaigns ENABLED long after their end_date passes.
+    Without this check those campaigns pollute segment totals, count maps, and
+    budget-ratio calculations even though they are functionally dead.
+
+    A campaign is a zombie when ALL of the following are true:
+      1. google_end_date is set and it's before the start of this month
+      2. The Google Ads API reports 0 MTD spend for this campaign this month
+    If the campaign ended *this* month but did spend money, it still counts.
+    """
+    if campaign.google_end_date is None:
+        return False
+    month_start = today.replace(day=1)
+    ended_before_month = campaign.google_end_date < month_start
+    return ended_before_month and (api_spend or 0) == 0
+
+
 def _campaigns_for_pacing(account, today, metrics_by_id):
-    """Return canonical live campaigns plus inactive campaigns with MTD spend."""
+    """Return canonical live campaigns plus inactive campaigns with MTD spend.
+
+    Zombie campaigns (ended before this month, $0 API spend) are excluded from
+    live_campaigns so they don't inflate segment counts or distort budget ratios.
+    They are also excluded from spending_inactive since they have no spend.
+    """
     campaigns = canonical_campaigns(account.campaigns)
     live_campaigns = [
         c for c in campaigns
-        if c.is_active and _campaign_is_active_today(c, today)
+        if c.is_active
+        and _campaign_is_active_today(c, today)
+        and not _is_zombie_campaign(
+            c, today, metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0)
+        )
     ]
     inactive_campaigns = [c for c in campaigns if not c.is_active]
 

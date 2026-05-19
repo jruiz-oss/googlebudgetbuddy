@@ -106,6 +106,8 @@ def _run_lightweight_migrations():
          'ALTER TABLE pacing_data ADD COLUMN IF NOT EXISTS conversions DOUBLE PRECISION'),
         ('pacing_data.cpc',
          'ALTER TABLE pacing_data ADD COLUMN IF NOT EXISTS cpc DOUBLE PRECISION'),
+        ('campaigns.google_end_date',
+         'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_end_date DATE'),
     ]
 
     with db.engine.begin() as conn:

@@ -62,10 +62,23 @@ def _ensure_settings(account):
     return account.settings
 
 
+def _parse_google_end_date(live_campaign):
+    """Parse the Google Ads end_date string into a date object, or None."""
+    from datetime import date as date_cls
+    end_date_str = (live_campaign.get('end_date') or '').strip()
+    if not end_date_str:
+        return None
+    try:
+        return date_cls.fromisoformat(end_date_str)
+    except (ValueError, TypeError):
+        return None
+
+
 def _upsert_campaign_from_live(account_id, live_campaign):
     """Create/update one canonical campaign row and sideline old duplicates."""
     cid = str(live_campaign['campaign_id'])
     is_live = _is_campaign_live(live_campaign)
+    google_end_date = _parse_google_end_date(live_campaign)
     existing_rows = Campaign.query.filter_by(
         account_id=account_id,
         google_campaign_id=cid,
@@ -77,6 +90,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         campaign.budget_resource_name = live_campaign.get('budget_resource_name')
         campaign.current_daily_budget = live_campaign.get('daily_budget_usd')
         campaign.is_active = is_live
+        campaign.google_end_date = google_end_date
 
         # Keep duplicate rows for historical integrity, but make sure they can no
         # longer look like independently active campaigns in live calculations.
@@ -93,6 +107,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         budget_resource_name=live_campaign.get('budget_resource_name'),
         current_daily_budget=live_campaign.get('daily_budget_usd'),
         is_active=is_live,
+        google_end_date=google_end_date,
     )
     db.session.add(campaign)
     return campaign, True

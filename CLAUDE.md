@@ -160,6 +160,9 @@ ALTER TABLE pacing_data ADD COLUMN clicks INTEGER;
 ALTER TABLE pacing_data ADD COLUMN conversions FLOAT;
 ALTER TABLE pacing_data ADD COLUMN cpc FLOAT;
 
+-- Zombie campaign filter (May 2026)
+ALTER TABLE campaigns ADD COLUMN google_end_date DATE;
+
 -- Future duplicate guard after cleaning existing duplicate rows
 -- 1) Pick one canonical row per (account_id, google_campaign_id)
 -- 2) Move any history you want to keep, or leave old rows inactive for reference
@@ -172,6 +175,16 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 ---
 
 ## Change log
+
+### 2026-05-19 — Exclude zombie campaigns (ended before this month, $0 spend)
+**What:** Campaigns that ended in a prior month and have no MTD spend this month are now excluded from both dashboard views and pacing runs.
+**Why:** Google Ads frequently leaves campaigns ENABLED years after their end_date passes. Relying on `is_active` alone wasn't sufficient because campaigns synced before the liveness-check fix still had `is_active=True`. These zombies inflated segment counts, distorted budget ratios, and cluttered the dashboard.
+**Rule:** A campaign is excluded when `google_end_date < start_of_this_month AND no_spend_this_month`. A campaign that ended mid-month but did spend is still included.
+**Changes:**
+- `backend/database.py`: Added `Campaign.google_end_date` column (nullable Date). Updated `visible_latest_campaigns()` to skip zombies. Added `google_end_date` to `Campaign.to_dict()`.
+- `backend/routes/accounts.py`: Added `_parse_google_end_date()` helper. `_upsert_campaign_from_live()` now stores `google_end_date` on every sync.
+- `backend/routes/pacing.py`: Added `_is_zombie_campaign()` helper. `_campaigns_for_pacing()` now excludes zombies from `live_campaigns` so they don't inflate segment counts or budget-ratio math.
+- `backend/app.py`: Added `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_end_date DATE` to startup migration.
 
 ### 2026-05-19 — Fix Pace % formula and days-elapsed off-by-one
 **What:** Changed displayed Pace % to match the sheet's % DIFF column (I), and fixed `daysIn` to use the prior day since spend is through EOD of the prior day.
