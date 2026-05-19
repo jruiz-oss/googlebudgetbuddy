@@ -1461,18 +1461,22 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
             skipped.append({"label": label, "reason": "No campaigns matched the filter keyword"})
             continue
 
-        # Distribute budget equally among matched campaigns in this segment
-        per_campaign_budget = round(budget / len(matched), 2)
+        # Store the full segment budget on every campaign in this segment.
+        # Pacing is computed at segment level (sum of campaign spends vs segment
+        # budget), so each campaign must carry the full segment budget — NOT a
+        # per-campaign fraction.  Dividing here would cause the dashboard to
+        # show a fraction of the sheet budget and make pace_ratio meaningless
+        # for multi-campaign segments.
         for c in matched:
             old_budget = c.monthly_budget
-            c.monthly_budget = per_campaign_budget
+            c.monthly_budget = budget
             c.budget_label = label
             c.campaign_filter = row["campaign_filter"].strip() or None
             updated.append({
                 "campaign_name": c.campaign_name,
                 "label": label,
                 "old_budget": old_budget,
-                "new_budget": per_campaign_budget,
+                "new_budget": budget,
             })
 
     db.session.commit()

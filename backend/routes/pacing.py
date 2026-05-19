@@ -241,40 +241,85 @@ def run_pacing(account_id):
         })
 
     # 4. Compute recommendations and save PacingData snapshots
+    #
+    # Segment-aware pacing: campaigns that share a budget_label share one
+    # segment budget pulled from the sheet.  Pacing must be computed at the
+    # segment level (sum of all campaign spends vs the segment budget) so that
+    # pace_ratio and recommended_daily are meaningful.  The per-campaign
+    # recommended daily budget is then split equally among the segment's
+    # campaigns (matching how Google Ads typically distributes a segment budget).
+    from collections import defaultdict
+
+    # --- Build segment aggregates (spend, current daily, count) --------------
+    seg_spend_map   = defaultdict(float)   # label → total MTD spend
+    seg_daily_map   = defaultdict(float)   # label → sum of current daily budgets
+    seg_count_map   = defaultdict(int)     # label → number of campaigns
+    seg_budget_map  = {}                   # label → segment monthly budget
+
+    for _c in active_campaigns:
+        _label = _c.budget_label or 'Primary'
+        _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
+        _latest = sorted(
+            _c.pacing_data,
+            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
+        )
+        _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
+
+        seg_spend_map[_label]  += _cspend
+        seg_daily_map[_label]  += _cdaily
+        seg_count_map[_label]  += 1
+        seg_budget_map[_label]  = _c.monthly_budget  # same value on every campaign in the segment
+
+    # --- Per-campaign loop ---------------------------------------------------
     recommendations = []
+    month_start, month_end = _month_bounds(today)
+    days_in_month  = (month_end - month_start).days + 1
+    days_elapsed   = (today - month_start).days + 1
+    days_remaining = (month_end - today).days + 1
+
     for campaign in active_campaigns:
+        label = campaign.budget_label or 'Primary'
         campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
         actual_spend = campaign_metrics.get('spend', 0.0)
-        clicks = campaign_metrics.get('clicks', None)
-        conversions = campaign_metrics.get('conversions', None)
+        clicks       = campaign_metrics.get('clicks', None)
+        conversions  = campaign_metrics.get('conversions', None)
         cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
 
-        # Get current daily budget from most recent PacingData or default to 0
+        # Current daily for this individual campaign
         latest_rows = sorted(
             campaign.pacing_data,
             key=lambda r: (r.date or datetime.min.date(), r.id or 0),
         )
         current_daily = latest_rows[-1].current_daily_budget if latest_rows and latest_rows[-1].current_daily_budget else 0.0
 
-        rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
-            campaign.monthly_budget, actual_spend, current_daily, today
+        # --- Segment-level computation ----------------------------------------
+        seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
+        seg_spend  = seg_spend_map.get(label, actual_spend)
+        seg_daily  = seg_daily_map.get(label, current_daily)
+        seg_count  = seg_count_map.get(label, 1)
+
+        seg_rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
+            seg_budget, seg_spend, seg_daily, today
         )
 
-        month_start, month_end = _month_bounds(today)
-        days_in_month = (month_end - month_start).days + 1
-        days_elapsed = (today - month_start).days + 1
-        days_remaining = (month_end - today).days + 1
+        # Split recommended daily equally across all campaigns in the segment.
+        # This matches how Google Ads distributes a shared segment budget.
+        rec = round(seg_rec / seg_count, 2) if seg_count > 0 else seg_rec
+
+        # For display: each campaign's proportional share of expected MTD spend
+        campaign_expected_mtd = round(expected_mtd / seg_count, 2) if seg_count > 0 else expected_mtd
+
         change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
 
-        # Save snapshot (with new performance metrics)
+        # Save snapshot — actual_spend is per-campaign; budget/pacing metrics are segment-level
         snap = PacingData(
             campaign_id=campaign.id,
             date=today,
             current_daily_budget=current_daily,
             actual_spend=round(actual_spend, 2),
-            expected_spend=round(expected_mtd, 2),
+            expected_spend=campaign_expected_mtd,
             pace_ratio=round(pace_ratio, 3),
-            recommended_daily_budget=round(rec, 2),
+            recommended_daily_budget=rec,
             change_percent=round(change_pct, 1),
             status=status,
             clicks=clicks,
@@ -288,13 +333,15 @@ def run_pacing(account_id):
             'campaign_name': campaign.campaign_name,
             'google_campaign_id': campaign.google_campaign_id,
             'budget_resource_name': campaign.budget_resource_name,
-            'budget_label': campaign.budget_label,
-            'monthly_budget': round(campaign.monthly_budget, 2),
-            'actual_spend': round(actual_spend, 2),
-            'expected_spend': round(expected_mtd, 2),
-            'pace_ratio': round(pace_ratio, 3),
+            'budget_label': label,
+            'monthly_budget': round(seg_budget, 2),         # full segment budget
+            'segment_spend': round(seg_spend, 2),           # total segment MTD spend
+            'segment_campaign_count': seg_count,
+            'actual_spend': round(actual_spend, 2),         # this campaign's spend
+            'expected_spend': campaign_expected_mtd,
+            'pace_ratio': round(pace_ratio, 3),             # segment-level pace ratio
             'current_daily_budget': round(current_daily, 2),
-            'recommended_daily_budget': round(rec, 2),
+            'recommended_daily_budget': rec,
             'change_percent': round(change_pct, 1),
             'status': status,
             'days_elapsed': days_elapsed,
@@ -710,8 +757,32 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         logger.info('run_pacing_for_account: account %s has no campaigns to pace — skipping', account.id)
         return
 
+    # Segment-aware pacing (mirrors the logic in run_pacing route).
+    # Build segment aggregates first so the per-campaign loop can use them.
+    from collections import defaultdict
+
+    seg_spend_map  = defaultdict(float)
+    seg_daily_map  = defaultdict(float)
+    seg_count_map  = defaultdict(int)
+    seg_budget_map = {}
+
+    for _c in active_campaigns:
+        _label = _c.budget_label or 'Primary'
+        _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
+        _latest = sorted(
+            _c.pacing_data,
+            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
+        )
+        _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
+
+        seg_spend_map[_label]  += _cspend
+        seg_daily_map[_label]  += _cdaily
+        seg_count_map[_label]  += 1
+        seg_budget_map[_label]  = _c.monthly_budget
+
     processed = 0
     for campaign in active_campaigns:
+        label = campaign.budget_label or 'Primary'
         campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
         actual_spend = campaign_metrics.get('spend', 0.0)
         clicks = campaign_metrics.get('clicks', None)
@@ -728,9 +799,17 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
             else 0.0
         )
 
-        rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
-            campaign.monthly_budget, actual_spend, current_daily, today
+        seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
+        seg_spend  = seg_spend_map.get(label, actual_spend)
+        seg_daily  = seg_daily_map.get(label, current_daily)
+        seg_count  = seg_count_map.get(label, 1)
+
+        seg_rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
+            seg_budget, seg_spend, seg_daily, today
         )
+        rec = round(seg_rec / seg_count, 2) if seg_count > 0 else seg_rec
+        campaign_expected_mtd = round(expected_mtd / seg_count, 2) if seg_count > 0 else expected_mtd
+
         _, month_end = _month_bounds(today)
         change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
 
@@ -739,9 +818,9 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
             date=today,
             current_daily_budget=current_daily,
             actual_spend=round(actual_spend, 2),
-            expected_spend=round(expected_mtd, 2),
+            expected_spend=campaign_expected_mtd,
             pace_ratio=round(pace_ratio, 3),
-            recommended_daily_budget=round(rec, 2),
+            recommended_daily_budget=rec,
             change_percent=round(change_pct, 1),
             status=status,
             clicks=clicks,

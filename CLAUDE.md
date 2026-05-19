@@ -189,6 +189,14 @@ On fresh deployments these are created automatically by `db.create_all()`.
 - `backend/routes/accounts.py`: Added `_is_campaign_live(lc)` helper. All sync paths (`_sync_all_campaigns_for_account`, MCC sync loop, `import_campaigns`) use it instead of hardcoding `is_active=True`.
 - `backend/routes/pacing.py`: `run_pacing`, `run_all_pacing`, `run_pacing_for_account` all split into `live_campaigns` + `inactive_campaigns`, fetch spend for all, then build `active_campaigns = live_campaigns + spending_inactive`.
 
+### 2026-05-18 — Segment budget fix: full budget stored per campaign + segment-level pacing
+**What:** Fixed two related bugs that caused incorrect budget figures and wrong pacing calculations for multi-campaign segments.
+**Bug 1 — Budget division:** `sync_google_ads_budgets_for_account` was dividing the sheet's segment budget by the number of matched campaigns (`budget / len(matched)`) before storing it on each campaign. A $1000 IndyCar budget with 3 campaigns showed as $333.33 on the dashboard.
+**Bug 2 — Per-campaign pacing against full segment budget:** Even with the correct budget, pacing each campaign individually against the full segment budget made every campaign appear severely underpaced (each campaign's $200 spend vs a $1000 budget = 20% pace, when the segment as a whole is at 60%).
+**Fix:**
+- `backend/routes/sheets.py` → `sync_google_ads_budgets_for_account`: Removed the `/len(matched)` division. Each campaign in a segment now carries the **full** segment budget.
+- `backend/routes/pacing.py` → `run_pacing` and `run_pacing_for_account`: Added a pre-loop segment aggregation pass (`seg_spend_map`, `seg_budget_map`, `seg_count_map`). Pacing is now computed at the segment level (segment total spend vs segment budget → `pace_ratio`, `recommended_daily`). The segment-level recommended daily budget is then split equally across campaigns in the segment.
+
 ### 2026-05-19 — Home dashboard spend fix + MCC sync now runs pacing
 **What:** Fixed two bugs causing the home dashboard to show 0/0 spent for all accounts.
 **Bug 1 — Missing campaigns in API response:** `Account.to_dict()` never included the `campaigns` array, so the home page's `/api/campaigns/all` response had `account.campaigns = undefined`. The frontend silently fell back to `[]` for every account → 0 spend, 0 budget. Fix: added `'campaigns': [c.to_dict() for c in self.campaigns]` to `Account.to_dict()` in `database.py`.
