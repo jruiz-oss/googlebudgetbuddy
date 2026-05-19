@@ -512,7 +512,7 @@ function AddAccountModal({ onClose, onAdded }) {
 }
 
 // ── Home (main export) ────────────────────────────────────────────────────
-export default function Home({ onAccountsChange, accounts: propAccounts }) {
+export default function Home({ onAccountsChange, onAccountSettingChange, accounts: propAccounts }) {
   const navigate       = useNavigate();
   const toast          = useToast();
   const { daysIn, daysInMonth } = getDaysInfo();
@@ -576,6 +576,13 @@ export default function Home({ onAccountsChange, accounts: propAccounts }) {
 
   const setCap = async (accountId, value) => {
     setCapStates(s => ({ ...s, [accountId]: value }));
+    // Patch local accounts state so the fallback is correct if capStates resets.
+    const patch = { auto_pause_enabled: value };
+    setAccounts(prev => prev.map(a =>
+      a.id === accountId ? { ...a, settings: { ...(a.settings || {}), ...patch } } : a
+    ));
+    // Also patch App-level propAccounts so the value survives navigation / re-mount.
+    onAccountSettingChange?.(accountId, patch);
     try { await axios.put(`/api/settings/${accountId}`, { auto_pause_enabled: value }); } catch { /* silent */ }
   };
 

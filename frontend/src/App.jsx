@@ -133,6 +133,16 @@ function AppRoutes() {
     } catch { /* silent */ }
   };
 
+  // Lightweight updater so child pages can patch a single account's data
+  // (e.g. settings toggle) without triggering a full reload.
+  const updateAccountSettings = (accountId, settingsPatch) => {
+    setAccounts(prev => prev.map(a =>
+      a.id === accountId
+        ? { ...a, settings: { ...(a.settings || {}), ...settingsPatch } }
+        : a
+    ));
+  };
+
   useEffect(() => { loadAccounts(); }, []);
 
   const handleSync = async () => {
@@ -165,7 +175,7 @@ function AppRoutes() {
       <Route path="/register" element={<Register />} />
 
       <Route path="/" element={
-        <ProtectedRoute>{wrap(<Home onAccountsChange={loadAccounts} accounts={accounts} />)}</ProtectedRoute>
+        <ProtectedRoute>{wrap(<Home onAccountsChange={loadAccounts} onAccountSettingChange={updateAccountSettings} accounts={accounts} />)}</ProtectedRoute>
       } />
 
       <Route path="/notifications" element={
