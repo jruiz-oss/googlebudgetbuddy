@@ -5,7 +5,10 @@ Math (mirrors the Google Sheet exactly):
   daily_target        = monthly_budget / days_in_month       (informational)
   expected_mtd        = daily_target * days_elapsed          (informational)
   pace_ratio          = actual_spend / expected_mtd          (shown in UI)
-  recommended_daily   = (monthly_budget - actual_spend) / days_remaining
+  recommended_daily   = (monthly_budget - actual_spend) / days_in_month
+
+  Dividing by days_in_month (not days_remaining) matches the Google Sheet
+  formula: =(C-D)/$E$2 where $E$2 = total days in the month.
 
 Status:
   ON_PACE  when |recommended - current_daily| < $0.01
@@ -69,10 +72,13 @@ def _compute_recommendation(monthly_budget, actual_spend, current_daily, today):
     expected_mtd = daily_target * days_elapsed
     pace_ratio = (actual_spend / expected_mtd) if expected_mtd > 0 else 1.0
 
-    if days_remaining <= 0 or monthly_budget <= 0:
+    if days_in_month <= 0 or monthly_budget <= 0:
         recommended = 0.0
     else:
-        recommended = max(0.0, (monthly_budget - actual_spend) / days_remaining)
+        # Mirrors the Google Sheet formula: (Budget - Spend) / days_in_month.
+        # Dividing by the full month length (not just remaining days) gives a
+        # conservative daily target that stays consistent across the month.
+        recommended = max(0.0, (monthly_budget - actual_spend) / days_in_month)
 
     diff = recommended - (current_daily or 0)
     if abs(diff) < 0.01:
@@ -277,7 +283,10 @@ def run_pacing(account_id):
         seg_spend_map[_label]  += _cspend
         seg_daily_map[_label]  += _cdaily
         seg_count_map[_label]  += 1
-        seg_budget_map[_label]  = _c.monthly_budget  # same value on every campaign in the segment
+        # Use max so an inactive campaign with monthly_budget=0 never overwrites
+        # the correct budget that was synced from the sheet onto an active campaign.
+        if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
+            seg_budget_map[_label] = _c.monthly_budget
 
     # --- Per-campaign loop ---------------------------------------------------
     recommendations = []
@@ -792,7 +801,10 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         seg_spend_map[_label]  += _cspend
         seg_daily_map[_label]  += _cdaily
         seg_count_map[_label]  += 1
-        seg_budget_map[_label]  = _c.monthly_budget
+        # Use max so an inactive campaign with monthly_budget=0 never overwrites
+        # the correct budget that was synced from the sheet onto an active campaign.
+        if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
+            seg_budget_map[_label] = _c.monthly_budget
 
     processed = 0
     for campaign in active_campaigns:

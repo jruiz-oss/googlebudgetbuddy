@@ -18,7 +18,8 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   const status       = deltaPct > 5 ? 'over' : deltaPct < -5 ? 'under' : 'ok';
   const daysLeft     = daysInMonth - daysIn;
   const dailyCurrent = daysIn > 0 ? spend / daysIn : 0;
-  const dailyRec     = daysLeft > 0 ? Math.max(0, monthly - spend) / daysLeft : 0;
+  // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
+  const dailyRec     = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
   return { idealSpend, deltaPct, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }
@@ -31,7 +32,10 @@ function getSegments(campaigns) {
   const map = {};
   for (const c of campaigns) {
     const label = c.budget_label || 'Primary';
-    if (!map[label]) map[label] = { name: label, monthly: c.monthly_budget || 0, spend: 0 };
+    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
+    // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
+    // correct budget that an active campaign in the same segment carries.
+    map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
     map[label].spend += c.latest_pacing?.actual_spend || 0;
   }
   return Object.values(map);
@@ -346,16 +350,55 @@ export default function AccountDashboard({ onPacingComplete }) {
 
   const handleConfirmApply = async (item) => {
     setApplyItem(null);
-    if (item.bulk) {
-      const adjustments = recommendations.map(r => ({ campaign_id: r.campaign_id, budget_resource_name: r.budget_resource_name, new_daily_budget: r.recommended_daily_budget }));
-      if (!adjustments.length) { toast.warn('Run pacing first to generate recommendations'); return; }
-      setApplying(true);
-      try { const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments }); toast.success(r.data.message); load(); }
-      catch (e) { toast.error(e.response?.data?.error || 'Apply failed'); }
-      finally { setApplying(false); }
-    } else {
-      toast.info('Pushing to Google Ads…');
-      setTimeout(() => { toast.success('Daily budget pushed to Google Ads'); load(); }, 800);
+    setApplying(true);
+    try {
+      if (item.bulk) {
+        // Bulk apply: use the recommended_daily_budget from the last pacing run (most accurate,
+        // already accounts for per-campaign segment splits done server-side).
+        const adjustments = recommendations.map(r => ({
+          campaign_id:          r.campaign_id,
+          budget_resource_name: r.budget_resource_name,
+          new_daily_budget:     r.recommended_daily_budget,
+        }));
+        if (!adjustments.length) {
+          toast.warn('Run pacing first to generate recommendations, then apply.');
+          return;
+        }
+        const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
+        toast.success(r.data.message);
+      } else {
+        // Single-budget or per-segment apply — compute from current campaign data.
+        // item.segmentOf is set when this is a per-segment row; item.name is the segment label.
+        // For single-budget accounts item.segmentOf is undefined — use all campaigns.
+        const { daysIn, daysInMonth } = getDaysInfo();
+        const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
+
+        const segLabel = item.segmentOf ? item.name : null;
+        const eligible = campaigns.filter(c =>
+          c.budget_resource_name &&
+          (segLabel === null || (c.budget_label || 'Primary') === segLabel)
+        );
+
+        if (!eligible.length) {
+          toast.warn('No campaigns have a budget resource name — run pacing first to populate them.');
+          return;
+        }
+
+        const perCampaign = Math.round((pace.dailyRec / eligible.length) * 100) / 100;
+        const adjustments = eligible.map(c => ({
+          campaign_id:          c.id,
+          budget_resource_name: c.budget_resource_name,
+          new_daily_budget:     perCampaign,
+        }));
+
+        const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
+        toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
+      }
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Apply failed');
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -382,7 +425,10 @@ export default function AccountDashboard({ onPacingComplete }) {
   const segments    = getSegments(campaigns);
   const isSegmented = segments.length > 1;
   const segBudgets  = {};
-  for (const c of campaigns) { const l = c.budget_label || 'Primary'; segBudgets[l] = c.monthly_budget || 0; }
+  for (const c of campaigns) {
+    const l = c.budget_label || 'Primary';
+    segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
+  }
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
   const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);

@@ -1397,9 +1397,13 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
             "skipped": [],
         }
 
-    db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+    # Include ALL campaigns (active + inactive) so that paused/ended campaigns
+    # which still have MTD spend this month also get the correct monthly_budget
+    # and budget_label. Excluding is_active=False left them at 0, which then
+    # overwrote the correct budget in the pacing segment aggregation.
+    db_campaigns = Campaign.query.filter_by(account_id=account_id).all()
     logger.info(
-        "Google Ads sync campaigns loaded: account_id=%s active_campaigns=%d",
+        "Google Ads sync campaigns loaded: account_id=%s total_campaigns=%d",
         account.id,
         len(db_campaigns),
     )

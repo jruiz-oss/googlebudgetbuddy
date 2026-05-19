@@ -18,7 +18,10 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   const status       = deltaPct > 5 ? 'over' : deltaPct < -5 ? 'under' : 'ok';
   const daysLeft     = daysInMonth - daysIn;
   const dailyCurrent = daysIn > 0 ? spend / daysIn : 0;
-  const dailyRec     = daysLeft > 0 ? Math.max(0, monthly - spend) / daysLeft : 0;
+  // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
+  // Dividing by the full month (not just remaining days) stays consistent with
+  // the sheet's =(C-D)/$E$2 calculation where $E$2 = total days in month.
+  const dailyRec     = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
   return { idealSpend, deltaPct, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }
@@ -38,7 +41,10 @@ function getSegments(account) {
   const map = {};
   for (const c of campaigns) {
     const label = c.budget_label || 'Primary';
-    if (!map[label]) map[label] = { name: label, monthly: c.monthly_budget || 0, spend: 0 };
+    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
+    // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
+    // correct budget that an active campaign in the same segment carries.
+    map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
     map[label].spend += c.latest_pacing?.actual_spend || 0;
   }
   return Object.values(map);
@@ -49,7 +55,9 @@ function accountPacing(account, daysIn, daysInMonth) {
   const segBudgets = {};
   for (const c of campaigns) {
     const label = c.budget_label || 'Primary';
-    segBudgets[label] = c.monthly_budget || 0;
+    // Use Math.max so an inactive campaign with monthly_budget=0 never
+    // overwrites the correct budget synced from the sheet for an active campaign.
+    segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
   }
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
   const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
@@ -164,7 +172,8 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
     if (isSegmented) {
       navigate(`/accounts/${account.id}`);
     } else {
-      onApply({ name: account.account_name, monthly, spend, single: true });
+      // Pass accountId and campaigns so the confirm handler can build adjustments
+      onApply({ name: account.account_name, accountId: account.id, campaigns: account.campaigns || [], monthly, spend });
     }
   };
 
@@ -440,10 +449,35 @@ export default function Home({ onAccountsChange, accounts: propAccounts }) {
     try { await axios.put(`/api/settings/${accountId}`, { auto_pause_enabled: value }); } catch { /* silent */ }
   };
 
-  const handleConfirmApply = (item) => {
+  const handleConfirmApply = async (item) => {
     setApplyItem(null);
-    toast.info('Pushing to Google Ads…');
-    setTimeout(() => { toast.success('Recommended daily budget pushed to Google Ads'); load(); }, 800);
+    const { daysIn, daysInMonth } = getDaysInfo();
+    const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
+
+    // Build one adjustment per campaign, splitting dailyRec evenly across the segment.
+    // Each campaign in a segment shares the segment's monthly budget, so each gets an
+    // equal slice of the recommended daily rate.
+    const eligible = (item.campaigns || []).filter(c => c.budget_resource_name);
+    if (!eligible.length) {
+      toast.warn('No campaigns have a budget resource name yet — run pacing first to populate them.');
+      return;
+    }
+    const perCampaign = Math.round((pace.dailyRec / eligible.length) * 100) / 100;
+    const adjustments = eligible.map(c => ({
+      campaign_id:          c.id,
+      budget_resource_name: c.budget_resource_name,
+      new_daily_budget:     perCampaign,
+    }));
+
+    toast.info(`Pushing ${eligible.length} budget(s) to Google Ads…`);
+    try {
+      const r = await axios.post(`/api/pacing/${item.accountId}/apply`, { adjustments });
+      toast.success(r.data.message || 'Daily budgets updated in Google Ads');
+      load();
+      onAccountsChange?.();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to push to Google Ads');
+    }
   };
 
   // Filter + sort

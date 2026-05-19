@@ -166,6 +166,17 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-19 — Fix "Set daily to $0" + math mismatch with Google Sheet
+**What:** Fixed two related bugs causing every account to show "Set daily to $0" and recommended budget numbers that didn't match the Google Sheet.
+**Bug 1 — Inactive campaign overwrites segment budget:** `seg_budget_map` (pacing.py) and `segBudgets`/`getSegments` (Home.jsx, AccountDashboard.jsx) used last-value-wins when iterating campaigns in a segment. An inactive campaign with `monthly_budget=0` (excluded from the sheet sync) appearing after an active campaign silently reset the segment budget to 0, causing `max(0, budget - spend) = 0`. Fixed by using `Math.max` so only the highest (correct) budget in a segment is used.
+**Bug 2 — Sheet budget sync excluded inactive campaigns:** `sync_google_ads_budgets_for_account` only queried `is_active=True` campaigns. Paused/ended campaigns that still showed MTD spend never got `monthly_budget` or `budget_label` set, perpetuating the overwrite issue. Fixed by querying all campaigns for the account.
+**Bug 3 — Recommended daily formula didn't match sheet:** Backend `_compute_recommendation` and frontend `computePace` divided remaining budget by `days_remaining` (~12), but the Google Sheet uses `days_in_month` (31): `=(Budget - Spend) / total_days`. Changed both to divide by `days_in_month` so numbers are consistent with the sheet.
+**Changes:**
+- `backend/routes/pacing.py`: `seg_budget_map` assignment now uses max (both `run_pacing` and `run_pacing_for_account`). `_compute_recommendation` now divides by `days_in_month`. Updated docstring + module comment.
+- `backend/routes/sheets.py`: `sync_google_ads_budgets_for_account` now queries all campaigns (not just `is_active=True`).
+- `frontend/src/pages/Home.jsx`: `segBudgets` and `getSegments` now use `Math.max`. `computePace.dailyRec` now divides by `daysInMonth`.
+- `frontend/src/pages/AccountDashboard.jsx`: Same `computePace` and `getSegments` fixes applied.
+
 ### 2026-05-18 — Dashboard shows only campaigns that spent this month
 **What:** Old campaigns kept appearing on both the Home dashboard and per-account view. Google Ads leaves campaigns set to ENABLED for years after they stop running, so the old "is_active OR spent-this-month" filter still let zombies through.
 **Why:** `is_active` is unreliable — it just mirrors the Google Ads status flag. The only trustworthy signal that a campaign actually ran is spend > 0 this calendar month. Trade-off accepted: brand-new campaigns with $0 spend won't show until their first spend (usually same day).
