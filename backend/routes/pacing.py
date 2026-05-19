@@ -165,10 +165,15 @@ def run_pacing(account_id):
             "No google_sheet_id configured",
         )
 
-    # 2. Get active campaigns to pace
-    active_campaigns = [c for c in account.campaigns if c.is_active and _campaign_is_active_today(c, today)]
+    # 2. Split campaigns into live vs inactive.
+    #    Live  = is_active True (ENABLED + not expired, set during sync).
+    #    Inactive = paused, expired-ENABLED, or REMOVED — stored in DB but
+    #               only included in pacing if they have MTD spend > 0.
+    live_campaigns = [c for c in account.campaigns if c.is_active and _campaign_is_active_today(c, today)]
+    inactive_campaigns = [c for c in account.campaigns if not c.is_active]
 
-    if not active_campaigns:
+    # Bail early only if there are truly no campaigns at all
+    if not account.campaigns:
         return jsonify({
             'recommendations': [],
             'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
@@ -180,13 +185,15 @@ def run_pacing(account_id):
     if is_grant_account:
         logger.info('Account %s is a Grant account — auto-pause will be skipped', account_id)
 
-    # 3. Fetch MTD spend from Google Ads API
-    # Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
-    campaign_ids = [c.google_campaign_id for c in active_campaigns]
+    # 3. Fetch MTD spend for ALL campaigns (live + inactive).
+    #    Inactive campaigns with spend > 0 this month are included in pacing.
+    #    Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
+    all_campaign_ids = [c.google_campaign_id for c in account.campaigns]
     logger.info(
-        "Run pacing spend fetch: account_id=%s active_campaigns=%d customer_id=%r mcc_id=%r",
+        "Run pacing spend fetch: account_id=%s live=%d inactive=%d customer_id=%r mcc_id=%r",
         account.id,
-        len(campaign_ids),
+        len(live_campaigns),
+        len(inactive_campaigns),
         account.google_customer_id,
         effective_mcc_id,
     )
@@ -194,7 +201,7 @@ def run_pacing(account_id):
         metrics_by_id = get_campaign_mtd_spend(
             token.refresh_token,
             account.google_customer_id,
-            campaign_ids,
+            all_campaign_ids,
             month_start,
             mcc_customer_id=effective_mcc_id,
         )
@@ -213,6 +220,20 @@ def run_pacing(account_id):
                 f"(customer {account.google_customer_id}, MCC {effective_mcc_id or 'none'}): {str(e)}"
             )
         }), 502
+
+    # Include inactive campaigns only if they spent money this month
+    spending_inactive = [
+        c for c in inactive_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    active_campaigns = live_campaigns + spending_inactive
+
+    if not active_campaigns:
+        return jsonify({
+            'recommendations': [],
+            'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
+            'sheet_sync': sheet_sync,
+        })
 
     # 4. Compute recommendations and save PacingData snapshots
     recommendations = []
@@ -537,24 +558,36 @@ def run_all_pacing():
                 except Exception as e:
                     logger.warning('Sheet sync failed for account %s in run-all: %s', account.id, e)
 
-            # 2. Active campaigns
-            active_campaigns = [
+            # 2. Split live vs inactive campaigns
+            live_campaigns = [
                 c for c in account.campaigns
                 if c.is_active and _campaign_is_active_today(c, today)
             ]
-            if not active_campaigns:
+            inactive_campaigns = [c for c in account.campaigns if not c.is_active]
+
+            if not account.campaigns:
                 results.append(acct_result)
                 continue
 
-            # 3. Fetch MTD spend from Google Ads API
-            campaign_ids = [c.google_campaign_id for c in active_campaigns]
+            # 3. Fetch MTD spend for ALL campaigns; inactive ones with spend get included
+            all_campaign_ids = [c.google_campaign_id for c in account.campaigns]
             metrics_by_id = get_campaign_mtd_spend(
                 token.refresh_token,
                 account.google_customer_id,
-                campaign_ids,
+                all_campaign_ids,
                 month_start,
                 mcc_customer_id=effective_mcc_id,
             )
+
+            spending_inactive = [
+                c for c in inactive_campaigns
+                if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+            ]
+            active_campaigns = live_campaigns + spending_inactive
+
+            if not active_campaigns:
+                results.append(acct_result)
+                continue
 
             # 4. Compute recommendations and write PacingData snapshots
             for campaign in active_campaigns:
@@ -727,20 +760,23 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
 
     is_grant_account = 'grant' in account.account_name.lower()
 
-    active_campaigns = [
+    live_campaigns = [
         c for c in account.campaigns
         if c.is_active and _campaign_is_active_today(c, today)
     ]
-    if not active_campaigns:
-        logger.info('run_pacing_for_account: account %s has no active campaigns — skipping', account.id)
+    inactive_campaigns = [c for c in account.campaigns if not c.is_active]
+
+    if not account.campaigns:
+        logger.info('run_pacing_for_account: account %s has no campaigns — skipping', account.id)
         return
 
-    campaign_ids = [c.google_campaign_id for c in active_campaigns]
+    # Fetch spend for ALL campaigns so inactive ones with MTD spend get included
+    all_campaign_ids = [c.google_campaign_id for c in account.campaigns]
     try:
         metrics_by_id = get_campaign_mtd_spend(
             refresh_token_str,
             account.google_customer_id,
-            campaign_ids,
+            all_campaign_ids,
             month_start,
             mcc_customer_id=effective_mcc_id,
         )
@@ -760,6 +796,17 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         )
         db.session.add(run)
         db.session.commit()
+        return
+
+    # Inactive campaigns with this-month spend get included in pacing
+    spending_inactive = [
+        c for c in inactive_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    active_campaigns = live_campaigns + spending_inactive
+
+    if not active_campaigns:
+        logger.info('run_pacing_for_account: account %s has no campaigns to pace — skipping', account.id)
         return
 
     processed = 0

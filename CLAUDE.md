@@ -166,6 +166,15 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-18 — Campaign liveness filter + paused-but-spending inclusion
+**What:** Fixed two related campaign filtering bugs.
+**Bug 1 — Zombie ENABLED campaigns:** Campaigns with status=ENABLED but a past `campaign.end_date` were being treated as live and included in pacing. Fix: `list_campaigns()` now fetches `campaign.end_date`; a new `_is_campaign_live()` helper in `accounts.py` sets `is_active = True` only for ENABLED campaigns with no end date or a future end date.
+**Bug 2 — PAUSED campaigns silently excluded:** PAUSED campaigns always got `is_active = False`, so spend they racked up earlier in the month was invisible. Fix: pacing runs now fetch MTD spend for ALL campaigns (live + inactive), then include inactive ones where `spend > 0` this month.
+**Changes:**
+- `backend/google_ads_client.py`: Added `campaign.end_date` to `list_campaigns()` SELECT; returned as `end_date` in each campaign dict.
+- `backend/routes/accounts.py`: Added `_is_campaign_live(lc)` helper. All sync paths (`_sync_all_campaigns_for_account`, MCC sync loop, `import_campaigns`) use it instead of hardcoding `is_active=True`.
+- `backend/routes/pacing.py`: `run_pacing`, `run_all_pacing`, `run_pacing_for_account` all split into `live_campaigns` + `inactive_campaigns`, fetch spend for all, then build `active_campaigns = live_campaigns + spending_inactive`.
+
 ### 2026-05-19 — Home dashboard spend fix + MCC sync now runs pacing
 **What:** Fixed two bugs causing the home dashboard to show 0/0 spent for all accounts.
 **Bug 1 — Missing campaigns in API response:** `Account.to_dict()` never included the `campaigns` array, so the home page's `/api/campaigns/all` response had `account.campaigns = undefined`. The frontend silently fell back to `[]` for every account → 0 spend, 0 budget. Fix: added `'campaigns': [c.to_dict() for c in self.campaigns]` to `Account.to_dict()` in `database.py`.

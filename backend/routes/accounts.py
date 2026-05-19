@@ -22,6 +22,26 @@ logger = logging.getLogger(__name__)
 
 accounts_bp = Blueprint('accounts', __name__, url_prefix='/api/accounts')
 
+
+def _is_campaign_live(lc):
+    """Return True if a campaign from the Google Ads API should be marked active.
+
+    Live = ENABLED status AND (no end date OR end date >= today).
+    PAUSED campaigns are stored in the DB but flagged inactive so they don't
+    pollute the default active set.  They are still included in pacing if they
+    spent money this calendar month (handled in pacing.py).
+    """
+    from datetime import date
+    if lc.get('status', '') != 'ENABLED':
+        return False
+    end_date_str = (lc.get('end_date') or '').strip()
+    if end_date_str:
+        try:
+            return date.fromisoformat(end_date_str) >= date.today()
+        except (ValueError, TypeError):
+            pass
+    return True  # ENABLED with no end date = always on
+
 # Guards against concurrent MCC syncs (double-click / retry storms).
 # acquire(blocking=False) in the route; released in the background worker.
 _mcc_sync_lock = threading.Lock()
@@ -167,11 +187,12 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
     added = updated = 0
     for lc in live:
         cid = str(lc['campaign_id'])
+        is_live = _is_campaign_live(lc)
         existing = Campaign.query.filter_by(account_id=account.id, google_campaign_id=cid).first()
         if existing:
             existing.campaign_name = lc['campaign_name']
             existing.budget_resource_name = lc.get('budget_resource_name')
-            existing.is_active = True
+            existing.is_active = is_live
             updated += 1
         else:
             db.session.add(Campaign(
@@ -180,7 +201,7 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
                 google_campaign_id=cid,
                 monthly_budget=0.0,
                 budget_resource_name=lc.get('budget_resource_name'),
-                is_active=True,
+                is_active=is_live,
             ))
             added += 1
     return added, updated
@@ -281,11 +302,12 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
 
                     for lc in live:
                         cid = str(lc['campaign_id'])
+                        is_live = _is_campaign_live(lc)
                         existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
                         if existing:
                             existing.campaign_name = lc['campaign_name']
                             existing.budget_resource_name = lc.get('budget_resource_name')
-                            existing.is_active = True
+                            existing.is_active = is_live
                             campaigns_updated += 1
                         else:
                             db.session.add(Campaign(
@@ -294,7 +316,7 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
                                 google_campaign_id=cid,
                                 monthly_budget=0.0,
                                 budget_resource_name=lc.get('budget_resource_name'),
-                                is_active=True,
+                                is_active=is_live,
                             ))
                             campaigns_added += 1
 
@@ -581,7 +603,7 @@ def import_campaigns(account_id):
         if existing:
             # Update budget resource name in case it changed
             existing.budget_resource_name = lc.get('budget_resource_name')
-            existing.is_active = True
+            existing.is_active = _is_campaign_live(lc)
             skipped += 1
         else:
             c = Campaign(
@@ -590,7 +612,7 @@ def import_campaigns(account_id):
                 google_campaign_id=cid,
                 monthly_budget=0.0,  # Will be set by sheet sync
                 budget_resource_name=lc.get('budget_resource_name'),
-                is_active=True,
+                is_active=_is_campaign_live(lc),
             )
             db.session.add(c)
             added += 1

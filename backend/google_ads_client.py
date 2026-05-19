@@ -245,6 +245,7 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
           campaign.id,
           campaign.name,
           campaign.status,
+          campaign.end_date,
           campaign.advertising_channel_type,
           campaign.campaign_budget,
           campaign_budget.id,
@@ -266,10 +267,13 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
         if channel_type in _PHANTOM_CHANNEL_TYPES:
             continue
         micros = int(b.get('amountMicros', 0) or 0)
+        # endDate is 'YYYY-MM-DD' string or absent/empty if no end date is set
+        end_date = (c.get('endDate') or '').strip() or None
         campaigns.append({
             'campaign_id': str(c.get('id', '')),
             'campaign_name': c.get('name', ''),
             'status': c.get('status', ''),
+            'end_date': end_date,
             'channel_type': channel_type,
             'budget_resource_name': b.get('resourceName', ''),
             'daily_budget_micros': micros,
