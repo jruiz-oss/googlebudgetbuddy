@@ -338,10 +338,36 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
                 except Exception as e:
                     logger.warning('Sheet sync step skipped during MCC sync: %s', e)
 
+            # Run pacing for all surviving accounts so the home dashboard
+            # shows real MTD spend immediately after a sync (not 0/0).
+            pacing_run_count = 0
+            if kept_accounts:
+                try:
+                    from routes.pacing import run_pacing_for_account
+                    logger.info('MCC sync: running pacing for %d accounts', len(kept_accounts))
+                    for acct in kept_accounts:
+                        try:
+                            # Re-fetch with relationships so pacing_data is available
+                            acct_full = (
+                                Account.query
+                                .options(
+                                    selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                                    selectinload(Account.settings),
+                                )
+                                .get(acct.id)
+                            )
+                            if acct_full:
+                                run_pacing_for_account(acct_full, refresh_token_str, triggered_by='mcc_sync')
+                                pacing_run_count += 1
+                        except Exception as e:
+                            logger.warning('Pacing run failed for account %s during MCC sync: %s', acct.id, e)
+                except Exception as e:
+                    logger.warning('Pacing step skipped during MCC sync: %s', e)
+
             logger.info(
                 'MCC sync complete: %d name(s) updated, %d account(s) removed, '
-                '%d campaigns added, %d updated, %d sheet(s) synced',
-                len(updated), len(deleted), campaigns_added, campaigns_updated, sheet_synced,
+                '%d campaigns added, %d updated, %d sheet(s) synced, %d account(s) paced',
+                len(updated), len(deleted), campaigns_added, campaigns_updated, sheet_synced, pacing_run_count,
             )
     except Exception as e:
         logger.error('MCC sync background job unexpected error: %s', e, exc_info=True)

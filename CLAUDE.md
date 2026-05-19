@@ -166,6 +166,16 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-19 — Home dashboard spend fix + MCC sync now runs pacing
+**What:** Fixed two bugs causing the home dashboard to show 0/0 spent for all accounts.
+**Bug 1 — Missing campaigns in API response:** `Account.to_dict()` never included the `campaigns` array, so the home page's `/api/campaigns/all` response had `account.campaigns = undefined`. The frontend silently fell back to `[]` for every account → 0 spend, 0 budget. Fix: added `'campaigns': [c.to_dict() for c in self.campaigns]` to `Account.to_dict()` in `database.py`.
+**Bug 2 — MCC sync didn't run pacing:** The home "Sync" button (`POST /api/accounts/sync-from-mcc`) synced campaigns and sheet budgets but never fetched MTD spend from Google Ads. Fix: moved `_run_pacing_for_account` from `app.py` into `routes/pacing.py` as `run_pacing_for_account(account, refresh_token_str, triggered_by)`, then called it at the end of `_run_mcc_sync_job` after sheet sync. The scheduler in `app.py` was also updated to import from `routes.pacing`.
+**Changes:**
+- `backend/database.py`: Added `'campaigns'` key to `Account.to_dict()`.
+- `backend/routes/pacing.py`: Added `run_pacing_for_account()` at bottom of file.
+- `backend/app.py`: Deleted inline `_run_pacing_for_account()`. Scheduler now calls `from routes.pacing import run_pacing_for_account`.
+- `backend/routes/accounts.py`: Added pacing step at end of `_run_mcc_sync_job`. Final log includes paced count.
+
 ### 2026-05-18 — Script replacement + composite segmentation
 **What:** Replaced the Google Ads MCC Script (Supabase pipeline) with BudgetBuddy handling everything natively. Ported all business rules from the script into the Flask backend.
 **Why:** Consolidate to one system; add a proper UI; make pacing data accessible beyond the spreadsheet.

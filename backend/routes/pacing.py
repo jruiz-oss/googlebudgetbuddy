@@ -705,3 +705,123 @@ def manual_pause(account_id):
         'message': f'{len(campaign_ids)} campaign(s) paused.',
         'paused_count': len(campaign_ids),
     })
+
+
+# ---------------------------------------------------------------------------
+# Internal pacing runner — used by scheduler and MCC sync (no request context)
+# ---------------------------------------------------------------------------
+
+def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
+    """Fetch MTD spend and write PacingData for one account.
+
+    Accepts a plain refresh_token_str so it can be called from background
+    threads that don't have a full OAuth token ORM object handy.
+    Mirrors the logic in the scheduler (_run_pacing_for_account in app.py).
+    """
+    from datetime import datetime
+
+    today = datetime.utcnow().date()
+    month_start, _ = _month_bounds(today)
+    settings = account.settings
+    effective_mcc_id = _effective_mcc_customer_id(account)
+
+    is_grant_account = 'grant' in account.account_name.lower()
+
+    active_campaigns = [
+        c for c in account.campaigns
+        if c.is_active and _campaign_is_active_today(c, today)
+    ]
+    if not active_campaigns:
+        logger.info('run_pacing_for_account: account %s has no active campaigns — skipping', account.id)
+        return
+
+    campaign_ids = [c.google_campaign_id for c in active_campaigns]
+    try:
+        metrics_by_id = get_campaign_mtd_spend(
+            refresh_token_str,
+            account.google_customer_id,
+            campaign_ids,
+            month_start,
+            mcc_customer_id=effective_mcc_id,
+        )
+    except GoogleAdsError as e:
+        logger.error(
+            'run_pacing_for_account spend fetch failed: account_id=%s name=%r error=%s',
+            account.id, account.account_name, e,
+        )
+        run = PacingRun(
+            account_id=account.id,
+            run_type='AUTO',
+            triggered_by=triggered_by,
+            campaigns_processed=0,
+            adjustments_made=0,
+            status='FAILED',
+            error_message=str(e),
+        )
+        db.session.add(run)
+        db.session.commit()
+        return
+
+    processed = 0
+    for campaign in active_campaigns:
+        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
+        actual_spend = campaign_metrics.get('spend', 0.0)
+        clicks = campaign_metrics.get('clicks', None)
+        conversions = campaign_metrics.get('conversions', None)
+        cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
+
+        latest_rows = sorted(
+            campaign.pacing_data,
+            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
+        )
+        current_daily = (
+            latest_rows[-1].current_daily_budget
+            if latest_rows and latest_rows[-1].current_daily_budget
+            else 0.0
+        )
+
+        rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
+            campaign.monthly_budget, actual_spend, current_daily, today
+        )
+        _, month_end = _month_bounds(today)
+        change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
+
+        snap = PacingData(
+            campaign_id=campaign.id,
+            date=today,
+            current_daily_budget=current_daily,
+            actual_spend=round(actual_spend, 2),
+            expected_spend=round(expected_mtd, 2),
+            pace_ratio=round(pace_ratio, 3),
+            recommended_daily_budget=round(rec, 2),
+            change_percent=round(change_pct, 1),
+            status=status,
+            clicks=clicks,
+            conversions=round(conversions, 1) if conversions is not None else None,
+            cpc=cpc,
+        )
+        db.session.add(snap)
+        processed += 1
+
+    run = PacingRun(
+        account_id=account.id,
+        run_type='AUTO',
+        triggered_by=triggered_by,
+        campaigns_processed=processed,
+        adjustments_made=0,
+        status='COMPLETED',
+    )
+    db.session.add(run)
+    db.session.commit()
+    logger.info(
+        'run_pacing_for_account completed: account_id=%s name=%r campaigns=%d',
+        account.id, account.account_name, processed,
+    )
+
+    # Write spend back to sheet
+    if settings and settings.google_sheet_id:
+        try:
+            from routes.sheets import write_sheet_spend_for_account
+            write_sheet_spend_for_account(account.id)
+        except Exception as e:
+            logger.warning('Sheet write-back failed for account %s: %s', account.id, e)

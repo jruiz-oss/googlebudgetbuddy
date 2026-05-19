@@ -130,6 +130,7 @@ class Account(db.Model):
                 'under_pacing': under_pacing,
             },
             'settings': self.settings.to_dict() if self.settings else None,
+            'campaigns': [c.to_dict() for c in self.campaigns],
         }
 
 
