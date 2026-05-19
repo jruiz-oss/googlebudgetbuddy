@@ -24,7 +24,7 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   // the sheet's =(C-D)/$E$2 calculation where $E$2 = total days in month.
   const dailyRec     = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
-  return { idealSpend, deltaPct, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
+  return { idealSpend, deltaPct, pacePct: pctOfBudget, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }
 
 function fmt(n) {
@@ -34,6 +34,10 @@ function fmt(n) {
 function fmtPct(n) {
   if (n == null || isNaN(n)) return '0.0%';
   return (n > 0 ? '+' : '') + n.toFixed(1) + '%';
+}
+function fmtPlainPct(n) {
+  if (n == null || isNaN(n)) return '0.0%';
+  return n.toFixed(1) + '%';
 }
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
@@ -237,7 +241,7 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
             <div className="card-name" title={account.account_name}>{account.account_name}</div>
             <div className="card-meta">{isSegmented ? `${segments.length} segments` : 'single budget'}</div>
           </div>
-          <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
+          <span className={`pill ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</span>
         </div>
 
         <PaceBar spend={spend} monthly={monthly} daysIn={daysIn} daysInMonth={daysInMonth} status={pace.status} />
@@ -282,9 +286,10 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       if (pace.status === 'warn')  under++;
     }
     const portfolioDelta = totalIdeal > 0 ? ((totalSpend / totalIdeal) - 1) * 100 : 0;
+    const portfolioPace = totalMonthly > 0 ? (totalSpend / totalMonthly) * 100 : 0;
     const absPD   = Math.abs(portfolioDelta);
     const pStatus = absPD > 10 ? 'over' : absPD > 5 ? 'warn' : 'green';
-    return { totalMonthly, totalSpend, totalIdeal, portfolioDelta, pStatus, over, under };
+    return { totalMonthly, totalSpend, totalIdeal, portfolioDelta, portfolioPace, pStatus, over, under };
   }, [accounts, daysIn, daysInMonth]);
 
   return (
@@ -296,8 +301,8 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       </div>
       <div className="cell">
         <div className="k">Portfolio pace</div>
-        <div className={`v ${stats.pStatus}`}>{fmtPct(stats.portfolioDelta)}</div>
-        <div className="sub">{fmt(stats.totalSpend)} vs ideal {fmt(stats.totalIdeal)}</div>
+        <div className={`v ${stats.pStatus}`}>{fmtPlainPct(stats.portfolioPace)}</div>
+        <div className="sub">{fmt(stats.totalSpend)} / {fmt(stats.totalMonthly)}</div>
       </div>
       <div className="cell">
         <div className="k">Monthly committed</div>

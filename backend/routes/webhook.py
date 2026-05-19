@@ -69,13 +69,12 @@ def _compute_pacing_status(actual_spend, monthly_budget, today):
 
     daily_target = monthly_budget / days_in_month if days_in_month else 0
     expected_mtd = daily_target * days_elapsed
-    pace_ratio = (actual_spend / expected_mtd) if expected_mtd > 0 else 1.0
+    pace_ratio = (actual_spend / monthly_budget) if monthly_budget > 0 else 0.0
 
-    days_remaining = (month_end - today).days + 1
-    if days_remaining <= 0 or monthly_budget <= 0:
+    if days_in_month <= 0 or monthly_budget <= 0:
         recommended = 0.0
     else:
-        recommended = max(0.0, (monthly_budget - actual_spend) / days_remaining)
+        recommended = max(0.0, (monthly_budget - actual_spend) / days_in_month)
 
     return expected_mtd, pace_ratio, recommended
 

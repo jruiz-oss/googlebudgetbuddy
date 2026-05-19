@@ -94,7 +94,7 @@ frontend/src/
    - Syncs budgets from sheet first using the Google Ads section flow
    - Fetches MTD spend + clicks + conversions via GAQL
    - Calculates expected spend for days elapsed
-   - Computes `pace_ratio = actual / expected`
+   - Computes sheet-style `pace_ratio = actual_spend / monthly_budget`
    - Recommends daily budget adjustment
    - Optionally pushes new daily budget to Google Ads
    - Writes a `PacingData` row per campaign + a `PacingRun` audit record
@@ -172,6 +172,15 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 ---
 
 ## Change log
+
+### 2026-05-19 — Match sheet pace percentage math
+**What:** Changed app-facing Pace % to match the Google Sheet's budget-utilization percentage.
+**Why:** MTD spend, monthly budget, and recommended daily matched the sheet, but Pace % differed because BudgetBuddy was showing variance vs ideal MTD spend (`actual / expected - 1`) instead of the sheet's `actual / monthly budget`.
+**Changes:**
+- `backend/routes/pacing.py` and `backend/routes/webhook.py`: `pace_ratio` now stores `actual_spend / monthly_budget`; expected MTD remains available for charts/projection.
+- `frontend/src/pages/Home.jsx` and `frontend/src/pages/AccountDashboard.jsx`: Pace pills/cards/segment rows now display plain budget-used percentage while keeping projection math for warning color/status.
+- `frontend/src/pages/Notifications.jsx`: Aligned the notification daily recommendation helper with the sheet formula that divides by total days in month.
+- `backend/tests/test_spend_accuracy.py`: Added regression coverage that Pace % equals budget used while recommended daily remains sheet-aligned.
 
 ### 2026-05-19 — Harden MTD totals against remaining duplicate rows
 **What:** Added normalized Google campaign ID deduping to backend account totals and frontend fallback aggregation.

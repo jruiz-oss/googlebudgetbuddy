@@ -22,11 +22,12 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
   const dailyRec     = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
-  return { idealSpend, deltaPct, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
+  return { idealSpend, deltaPct, pacePct: pctOfBudget, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }
 
 function fmt(n) { return '$' + Math.round(n || 0).toLocaleString('en-US'); }
 function fmtPct(n) { return (n > 0 ? '+' : '') + (n || 0).toFixed(1) + '%'; }
+function fmtPlainPct(n) { return (n || 0).toFixed(1) + '%'; }
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
 }
@@ -543,7 +544,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             <span style={{ color: 'var(--line-2)' }}>·</span>
             day {daysIn} of {daysInMonth}
             <span style={{ color: 'var(--line-2)' }}>·</span>
-            <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
+            <span className={`pill ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</span>
           </div>
         </div>
         <div className="dactions">
@@ -563,7 +564,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
         <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(currentDailyTotal)}</div><div className="ssub">live Google Ads budgets</div></div>
         <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
-        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">{pace.status === 'over' ? (pace.deltaPct > 0 ? 'ahead >10%' : 'behind >10%') : pace.status === 'warn' ? (pace.deltaPct > 0 ? 'slightly ahead' : 'slightly behind') : 'on track ±5%'}</div></div>
+        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</div><div className="ssub">of monthly budget used</div></div>
       </div>
 
       {/* Two-column */}
@@ -624,7 +625,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                             <span style={{ fontWeight: 500 }}>{s.name}</span>
                           </div>
                         </td>
-                        <td><span className={`pill ${sp.status}`}>{fmtPct(sp.deltaPct)}</span></td>
+                        <td><span className={`pill ${sp.status}`}>{fmtPlainPct(sp.pacePct)}</span></td>
                         <td>{fmt(s.spend)}</td>
                         <td>{fmt(s.monthly)}</td>
                         <td>{fmt(s.currentDaily)}</td>

@@ -22,7 +22,7 @@ from database import (  # noqa: E402
     visible_latest_campaigns,
 )
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
-from routes.pacing import _allocated_recommendation  # noqa: E402
+from routes.pacing import _allocated_recommendation, _compute_recommendation  # noqa: E402
 from routes.sheets import write_google_ads_spend_for_account  # noqa: E402
 
 
@@ -159,6 +159,20 @@ class SpendAccuracyTest(unittest.TestCase):
         self.assertEqual(_allocated_recommendation(300, 30, 100, 2), 90)
         self.assertEqual(_allocated_recommendation(300, 70, 100, 2), 210)
         self.assertEqual(_allocated_recommendation(300, 0, 0, 2), 150)
+
+    def test_pace_ratio_matches_sheet_budget_used_percent(self):
+        recommended, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
+            monthly_budget=1000,
+            actual_spend=250,
+            current_daily=25,
+            today=date(2026, 5, 15),
+        )
+
+        self.assertEqual(round(pace_ratio, 3), 0.25)
+        self.assertEqual(round(recommended, 2), 24.19)
+        self.assertEqual(round(expected_mtd, 2), 483.87)
+        self.assertEqual(round(daily_target, 2), 32.26)
+        self.assertEqual(status, 'DECREASE')
 
     def test_sheet_writeback_uses_current_run_totals_and_manual_rejects_stale_rows(self):
         account = Account(user_id=1, account_name='Goodwill AZ - Retail Grant', google_customer_id='3525872801')

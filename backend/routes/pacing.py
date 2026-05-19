@@ -4,7 +4,7 @@ Pacing routes — run pacing and apply budget recommendations.
 Math (mirrors the Google Sheet exactly):
   daily_target        = monthly_budget / days_in_month       (informational)
   expected_mtd        = daily_target * days_elapsed          (informational)
-  pace_ratio          = actual_spend / expected_mtd          (shown in UI)
+  pace_ratio          = actual_spend / monthly_budget        (sheet "pace %" / budget used)
   recommended_daily   = (monthly_budget - actual_spend) / days_in_month
 
   Dividing by days_in_month (not days_remaining) matches the Google Sheet
@@ -71,7 +71,9 @@ def _compute_recommendation(monthly_budget, actual_spend, current_daily, today):
 
     daily_target = monthly_budget / days_in_month if days_in_month else 0
     expected_mtd = daily_target * days_elapsed
-    pace_ratio = (actual_spend / expected_mtd) if expected_mtd > 0 else 1.0
+    # The Google Sheet's pace percentage is budget utilization, not variance
+    # against ideal MTD spend. Keep expected_mtd for charts/projection only.
+    pace_ratio = (actual_spend / monthly_budget) if monthly_budget > 0 else 0.0
 
     if days_in_month <= 0 or monthly_budget <= 0:
         recommended = 0.0
