@@ -167,11 +167,18 @@ ALTER TABLE pacing_data ADD COLUMN cpc FLOAT;
 ALTER TABLE campaigns ADD CONSTRAINT uq_campaign_account_google_id UNIQUE (account_id, google_campaign_id);
 ```
 
-On fresh deployments these are created automatically by `db.create_all()`.
+On fresh deployments these are created automatically by `db.create_all()`. On Postgres deployments, app startup also runs lightweight `ADD COLUMN IF NOT EXISTS` checks for the additive columns above so a missed manual migration does not break account loading. The SQL remains useful for manual repair or one-off DB consoles.
 
 ---
 
 ## Change log
+
+### 2026-05-19 — Add startup checks for additive DB columns
+**What:** Added a lightweight Postgres migration pass during backend startup for additive campaign/pacing columns.
+**Why:** Production account loading failed after `Campaign.current_daily_budget` was deployed before the DB column existed; `/api/campaigns/all` crashed with `UndefinedColumn`.
+**Changes:**
+- `backend/app.py`: After `db.create_all()`, startup now runs `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for `campaigns.budget_label`, `campaigns.campaign_filter`, `campaigns.current_daily_budget`, and the pacing performance columns.
+- `CLAUDE.md` / `AGENTS.md`: Documented that these additive columns are now auto-checked on Postgres while keeping manual SQL notes for emergency repair.
 
 ### 2026-05-19 — Preserve campaign budget ratios on apply
 **What:** Applying recommended daily budgets now preserves each campaign's current share of the account/segment daily budget instead of splitting evenly.

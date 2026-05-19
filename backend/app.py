@@ -87,6 +87,33 @@ def _acquire_postgres_advisory_lock(lock_id: int, keep_open: bool = False):
     return None, False
 
 
+def _run_lightweight_migrations():
+    """Apply additive Postgres columns that db.create_all() won't add later."""
+    database_url = os.environ.get('DATABASE_URL', '')
+    if 'postgresql' not in database_url:
+        return
+
+    statements = [
+        ('campaigns.budget_label',
+         'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS budget_label VARCHAR(100)'),
+        ('campaigns.campaign_filter',
+         'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS campaign_filter VARCHAR(100)'),
+        ('campaigns.current_daily_budget',
+         'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS current_daily_budget DOUBLE PRECISION'),
+        ('pacing_data.clicks',
+         'ALTER TABLE pacing_data ADD COLUMN IF NOT EXISTS clicks INTEGER'),
+        ('pacing_data.conversions',
+         'ALTER TABLE pacing_data ADD COLUMN IF NOT EXISTS conversions DOUBLE PRECISION'),
+        ('pacing_data.cpc',
+         'ALTER TABLE pacing_data ADD COLUMN IF NOT EXISTS cpc DOUBLE PRECISION'),
+    ]
+
+    with db.engine.begin() as conn:
+        for label, statement in statements:
+            conn.execute(sqlalchemy.text(statement))
+            logger.info('Migration checked: %s', label)
+
+
 def create_app():
     app = Flask(__name__)
 
@@ -143,6 +170,7 @@ def create_app():
                 if acquired:
                     db.create_all()
                     logger.info('db.create_all() completed')
+                    _run_lightweight_migrations()
                     if lock_conn is not None:
                         lock_conn.close()
                 else:
@@ -150,6 +178,7 @@ def create_app():
             except Exception as e:
                 logger.warning('db.create_all() skipped (SQLite or lock held): %s', e)
                 db.create_all()
+                _run_lightweight_migrations()
 
     return app
 
