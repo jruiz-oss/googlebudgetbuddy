@@ -15,7 +15,8 @@ function getDaysInfo() {
 function computePace(monthly, spend, daysIn, daysInMonth) {
   const idealSpend   = monthly > 0 ? monthly * (daysIn / daysInMonth) : 0;
   const deltaPct     = idealSpend > 0 ? ((spend / idealSpend) - 1) * 100 : 0;
-  const status       = deltaPct > 5 ? 'over' : deltaPct < -5 ? 'under' : 'ok';
+  const absDelta     = Math.abs(deltaPct);
+  const status       = absDelta > 10 ? 'over' : absDelta > 5 ? 'warn' : 'ok';
   const daysLeft     = daysInMonth - daysIn;
   const dailyCurrent = daysIn > 0 ? spend / daysIn : 0;
   // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
@@ -518,7 +519,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
         <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(pace.dailyCurrent)}</div><div className="ssub">avg of {daysIn} days</div></div>
         <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
-        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">{pace.status === 'over' ? 'ahead of pace' : pace.status === 'under' ? 'behind pace' : 'within ±5%'}</div></div>
+        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">{pace.status === 'over' ? (pace.deltaPct > 0 ? 'ahead >10%' : 'behind >10%') : pace.status === 'warn' ? (pace.deltaPct > 0 ? 'slightly ahead' : 'slightly behind') : 'on track ±5%'}</div></div>
       </div>
 
       {/* Two-column */}

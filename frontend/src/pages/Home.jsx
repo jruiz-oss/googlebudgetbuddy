@@ -15,7 +15,8 @@ function getDaysInfo() {
 function computePace(monthly, spend, daysIn, daysInMonth) {
   const idealSpend   = monthly > 0 ? monthly * (daysIn / daysInMonth) : 0;
   const deltaPct     = idealSpend > 0 ? ((spend / idealSpend) - 1) * 100 : 0;
-  const status       = deltaPct > 5 ? 'over' : deltaPct < -5 ? 'under' : 'ok';
+  const absDelta     = Math.abs(deltaPct);
+  const status       = absDelta > 10 ? 'over' : absDelta > 5 ? 'warn' : 'ok';
   const daysLeft     = daysInMonth - daysIn;
   const dailyCurrent = daysIn > 0 ? spend / daysIn : 0;
   // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
@@ -101,7 +102,7 @@ function Switch({ on, onChange }) {
 function PaceBar({ spend, monthly, daysIn, daysInMonth, status }) {
   const pct      = monthly > 0 ? Math.min((spend / monthly) * 100, 100) : 0;
   const idealPct = Math.min((daysIn / daysInMonth) * 100, 99);
-  const fillColor = status === 'over' ? 'var(--red)' : status === 'under' ? 'var(--amber)' : 'var(--green)';
+  const fillColor = status === 'over' ? 'var(--red)' : status === 'warn' ? 'var(--amber)' : 'var(--green)';
   return (
     <div className="pace-bar-wrap">
       <div className="pace-bar-fill" style={{ width: `${pct}%`, background: fillColor }} />
@@ -247,10 +248,11 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       totalSpend   += spend;
       totalIdeal   += pace.idealSpend;
       if (pace.status === 'over')  over++;
-      if (pace.status === 'under') under++;
+      if (pace.status === 'warn')  under++;
     }
     const portfolioDelta = totalIdeal > 0 ? ((totalSpend / totalIdeal) - 1) * 100 : 0;
-    const pStatus = portfolioDelta > 5 ? 'over' : portfolioDelta < -5 ? 'under' : 'green';
+    const absPD   = Math.abs(portfolioDelta);
+    const pStatus = absPD > 10 ? 'over' : absPD > 5 ? 'warn' : 'green';
     return { totalMonthly, totalSpend, totalIdeal, portfolioDelta, pStatus, over, under };
   }, [accounts, daysIn, daysInMonth]);
 
