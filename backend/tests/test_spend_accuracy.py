@@ -22,8 +22,8 @@ from database import (  # noqa: E402
     visible_latest_campaigns,
 )
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
-from routes.pacing import _allocated_recommendation, _compute_recommendation  # noqa: E402
-from routes.sheets import write_google_ads_spend_for_account  # noqa: E402
+from routes.pacing import _allocated_recommendation, _compute_recommendation, _segment_summaries_from_maps  # noqa: E402
+from routes.sheets import _google_ads_row_assignments, write_google_ads_spend_for_account  # noqa: E402
 
 
 class SpendAccuracyTest(unittest.TestCase):
@@ -132,6 +132,41 @@ class SpendAccuracyTest(unittest.TestCase):
         self.assertEqual(len(canonical), 1)
         self.assertEqual(total, 250)
         self.assertEqual(segments[0]['spend'], 250)
+
+    def test_multi_campaign_segment_rolls_up_to_one_segment_total(self):
+        summaries = _segment_summaries_from_maps(
+            seg_budget_map={'Brand': 5000},
+            seg_spend_map={'Brand': 1200},
+            seg_daily_map={'Brand': 150},
+            seg_count_map={'Brand': 2},
+        )
+
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]['name'], 'Brand')
+        self.assertEqual(summaries[0]['spend'], 1200)
+        self.assertEqual(summaries[0]['campaign_count'], 2)
+
+    def test_google_ads_segment_assignments_do_not_double_claim_overlapping_filters(self):
+        rows = [
+            {'row_index': 10, 'campaign_filter': 'Brand', 'monthly_budget': 5000},
+            {'row_index': 11, 'campaign_filter': 'Brand Shoes', 'monthly_budget': 1000},
+            {'row_index': 12, 'campaign_filter': '', 'monthly_budget': 3000},
+        ]
+        campaigns = [
+            Campaign(id=1, campaign_name='Brand Shoes Search', google_campaign_id='1'),
+            Campaign(id=2, campaign_name='Brand General Search', google_campaign_id='2'),
+            Campaign(id=3, campaign_name='Prospecting Search', google_campaign_id='3'),
+        ]
+
+        assignments = _google_ads_row_assignments(rows, campaigns)
+        matched = {
+            a['label']: [c.google_campaign_id for c in a['matched']]
+            for a in assignments
+        }
+
+        self.assertEqual(matched['Brand Shoes'], ['1'])
+        self.assertEqual(matched['Brand'], ['2'])
+        self.assertEqual(matched['Primary'], ['3'])
 
     def test_delete_today_pacing_data_removes_stale_same_day_rows(self):
         account = Account(user_id=1, account_name='Acct', google_customer_id='111')

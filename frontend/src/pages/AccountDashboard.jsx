@@ -59,7 +59,16 @@ function allocateByCurrentShare(campaigns, totalDaily) {
   }));
 }
 
-function getSegments(campaigns) {
+function getSegments(account, campaigns) {
+  if (Array.isArray(account?.segment_summaries) && account.segment_summaries.length) {
+    return account.segment_summaries.map(s => ({
+      name: s.name,
+      monthly: s.monthly || 0,
+      spend: s.spend || 0,
+      currentDaily: s.current_daily || 0,
+      campaignCount: s.campaign_count || 0,
+    }));
+  }
   if (!campaigns.length) return [];
   // Only use campaigns from the most recent pacing run. Campaigns with older
   // pacing dates are stale (from pre-fix runs or campaigns no longer spending)
@@ -370,6 +379,12 @@ export default function AccountDashboard({ onPacingComplete }) {
       const r = await axios.post(`/api/pacing/${id}/run`);
       const recs = r.data.recommendations || [];
       setRecs(recs); setSheetSync(r.data.sheet_sync); setSheetWrite(r.data.sheet_write); setLastSync(new Date());
+      setAccount(prev => prev ? {
+        ...prev,
+        total_monthly_budget: r.data.total_monthly_budget ?? prev.total_monthly_budget,
+        mtd_spend: r.data.mtd_spend ?? prev.mtd_spend,
+        segment_summaries: r.data.segment_summaries ?? prev.segment_summaries,
+      } : prev);
       mergeRecs(recs);
       if (r.data.sheet_sync?.updated_count > 0) toast.info(`Pulled ${r.data.sheet_sync.updated_count} budget(s) from Google Sheet`);
       if (r.data.sheet_sync?.warning) toast.warn(r.data.sheet_sync.warning);
@@ -487,14 +502,16 @@ export default function AccountDashboard({ onPacingComplete }) {
 
   if (!account) return <div className="bb-alert bb-alert-error">Account not found</div>;
 
-  const segments    = getSegments(campaigns);
+  const segments    = getSegments(account, campaigns);
   const isSegmented = segments.length > 1;
   const segBudgets  = {};
   for (const c of uniqueCampaigns(campaigns)) {
     const l = c.budget_label || 'Primary';
     segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
-  const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
+  const monthly = typeof account.total_monthly_budget === 'number'
+    ? account.total_monthly_budget
+    : Object.values(segBudgets).reduce((s, b) => s + b, 0);
   // Only sum spend from the most recent pacing run to avoid stale campaigns
   // (from old/buggy runs) inflating the total. Also dedup by google_campaign_id.
   const _mostRecentDate = campaigns.reduce((latest, c) => {
@@ -503,13 +520,15 @@ export default function AccountDashboard({ onPacingComplete }) {
     return !latest || d > latest ? d : latest;
   }, null);
   const _spendSeenGids = new Set();
-  const spend = campaigns.reduce((s, c) => {
-    if (_mostRecentDate && c.latest_pacing?.date !== _mostRecentDate) return s;
-    const key = campaignKey(c);
-    if (_spendSeenGids.has(key)) return s;
-    _spendSeenGids.add(key);
-    return s + (c.latest_pacing?.actual_spend || 0);
-  }, 0);
+  const spend = typeof account.mtd_spend === 'number'
+    ? account.mtd_spend
+    : campaigns.reduce((s, c) => {
+      if (_mostRecentDate && c.latest_pacing?.date !== _mostRecentDate) return s;
+      const key = campaignKey(c);
+      if (_spendSeenGids.has(key)) return s;
+      _spendSeenGids.add(key);
+      return s + (c.latest_pacing?.actual_spend || 0);
+    }, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
   const currentDailyTotal = uniqueCampaigns(campaigns).reduce((s, c) => s + currentDaily(c), 0);
 
@@ -673,9 +692,9 @@ export default function AccountDashboard({ onPacingComplete }) {
       {/* Raw recommendations table (kept for completeness) */}
       {recommendations.length > 0 && (
         <div className="bb-card" style={{ marginTop: 14 }}>
-          <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Pacing Details</div>
+          <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Campaign Budget Allocations</div>
           <table className="bb-table">
-            <thead><tr><th>Campaign</th><th>MTD Spend</th><th>Pace %</th><th>Current Daily</th><th>Rec Daily</th><th>Change</th></tr></thead>
+            <thead><tr><th>Campaign</th><th>Campaign MTD</th><th>Segment Pace</th><th>Current Daily</th><th>Rec Daily</th><th>Change</th></tr></thead>
             <tbody>
               {recommendations.map(rec => (
                 <tr key={rec.campaign_id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${rec.campaign_id}`)}>

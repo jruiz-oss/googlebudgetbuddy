@@ -173,6 +173,15 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-19 — Fix segmented account rollups
+**What:** Made segmented account dashboards and sheet writeback treat each sheet segment as one rollup that can contain multiple campaigns.
+**Why:** Segmented accounts could show MTD mismatches or appear to split one segment into campaign-level subsegments when campaign filters overlapped or the account dashboard rebuilt segment totals from campaign rows.
+**Changes:**
+- `backend/routes/sheets.py`: Added one-time campaign assignment per Google Ads sheet row, using the most-specific matching filter first, so overlapping filters cannot double-claim a campaign or double-count spend.
+- `backend/routes/pacing.py`: Manual/scheduled pacing now serializes one segment summary per `budget_label`, including rolled-up MTD spend, budget, current daily total, and campaign count.
+- `frontend/src/pages/AccountDashboard.jsx`: Account-specific dashboards now prefer backend segment summaries and backend account MTD/budget totals instead of recomputing segmented totals from campaign rows.
+- `backend/tests/test_spend_accuracy.py`: Added regression tests for multi-campaign segment rollups and overlapping sheet filters.
+
 ### 2026-05-19 — Match sheet pace percentage math
 **What:** Changed app-facing Pace % to match the Google Sheet's budget-utilization percentage.
 **Why:** MTD spend, monthly budget, and recommended daily matched the sheet, but Pace % differed because BudgetBuddy was showing variance vs ideal MTD spend (`actual / expected - 1`) instead of the sheet's `actual / monthly budget`.

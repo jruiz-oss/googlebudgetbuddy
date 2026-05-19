@@ -36,7 +36,7 @@ from flask import Blueprint, jsonify, request, session
 
 from database import (
     Account, AccountSettings, Campaign, PacingData, db,
-    canonical_campaigns,
+    campaign_identity_key, canonical_campaigns,
 )
 from routes.auth import login_required
 
@@ -1288,30 +1288,64 @@ def _get_google_ads_section(worksheet, account_name: str) -> list:
     return rows
 
 
-def preview_google_ads_rows_for_account(account: Account, worksheet, tab_name: str) -> dict:
-    """Preview how Google Ads sheet rows map onto this account's tracked campaigns."""
-    sheet_rows = _get_google_ads_section(worksheet, account.account_name)
-    db_campaigns = Campaign.query.filter_by(account_id=account.id, is_active=True).all()
+def _google_ads_row_assignments(sheet_rows: list, db_campaigns: list) -> list:
+    """Assign campaigns to one Google Ads sheet segment row at most.
+
+    Overlapping filters used to let one campaign contribute to multiple sheet
+    rows. That inflated segmented MTD writeback and made multi-campaign
+    segments look like smaller campaign-level segments.
+    """
     named_filters = [
         row["campaign_filter"].strip().lower()
         for row in sheet_rows
         if row["campaign_filter"].strip()
     ]
+    assignments = [
+        {
+            "row": row,
+            "label": row["campaign_filter"].strip() or "Primary",
+            "filter": row["campaign_filter"].strip().lower(),
+            "matched": [],
+        }
+        for row in sheet_rows
+    ]
+    claim_order = sorted(
+        (a for a in assignments if a["filter"]),
+        key=lambda a: (-len(a["filter"]), a["row"]["row_index"]),
+    ) + [a for a in assignments if not a["filter"]]
+    claimed = set()
+
+    for assignment in claim_order:
+        cf = assignment["filter"]
+        if cf:
+            candidates = [c for c in db_campaigns if cf in (c.campaign_name or "").lower()]
+        else:
+            candidates = [
+                c for c in db_campaigns
+                if not any(f in (c.campaign_name or "").lower() for f in named_filters)
+            ]
+
+        for campaign in candidates:
+            key = campaign_identity_key(campaign)
+            if key in claimed:
+                continue
+            assignment["matched"].append(campaign)
+            claimed.add(key)
+
+    return assignments
+
+
+def preview_google_ads_rows_for_account(account: Account, worksheet, tab_name: str) -> dict:
+    """Preview how Google Ads sheet rows map onto this account's tracked campaigns."""
+    sheet_rows = _get_google_ads_section(worksheet, account.account_name)
+    db_campaigns = Campaign.query.filter_by(account_id=account.id, is_active=True).all()
 
     preview_rows = []
-    for row in sheet_rows:
-        cf = row["campaign_filter"].strip().lower()
-        label = row["campaign_filter"].strip() or "Primary"
-
-        if cf:
-            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
-            match_type = "segment_filter"
-        else:
-            matched = [
-                c for c in db_campaigns
-                if not any(f in c.campaign_name.lower() for f in named_filters)
-            ]
-            match_type = "primary_catch_all"
+    for assignment in _google_ads_row_assignments(sheet_rows, db_campaigns):
+        row = assignment["row"]
+        label = assignment["label"]
+        matched = assignment["matched"]
+        match_type = "segment_filter" if assignment["filter"] else "primary_catch_all"
 
         matched_names = [c.campaign_name for c in matched]
         joined_names = ", ".join(matched_names)
@@ -1415,19 +1449,14 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
         len(db_campaigns),
     )
 
-    # Collect all named filter keywords so we can identify the "Primary" segment
-    named_filters = [
-        r["campaign_filter"].lower()
-        for r in sheet_rows
-        if r["campaign_filter"].strip()
-    ]
-
     updated = []
     skipped = []
 
-    for row in sheet_rows:
-        cf = row["campaign_filter"].strip().lower()
-        label = row["campaign_filter"].strip() or "Primary"
+    for assignment in _google_ads_row_assignments(sheet_rows, db_campaigns):
+        row = assignment["row"]
+        cf = assignment["filter"]
+        label = assignment["label"]
+        matched = assignment["matched"]
         budget = row["monthly_budget"]
         if budget is None:
             logger.info(
@@ -1439,16 +1468,6 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
             )
             skipped.append({"label": label, "reason": "No budget value in col C"})
             continue
-
-        if cf:
-            # Named segment: campaigns whose name contains the filter keyword
-            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
-        else:
-            # Primary segment: campaigns NOT claimed by any named filter
-            matched = [
-                c for c in db_campaigns
-                if not any(f in c.campaign_name.lower() for f in named_filters)
-            ]
 
         logger.info(
             "Google Ads sync row match: account_id=%s row=%s label=%r filter=%r budget=%s matched_count=%d matched_campaigns=%s",
@@ -1538,27 +1557,14 @@ def write_google_ads_spend_for_account(account_id: int, segment_spend_by_label: 
         len(db_campaigns),
         bool(segment_spend_by_label),
     )
-    named_filters = [
-        r["campaign_filter"].lower()
-        for r in sheet_rows
-        if r["campaign_filter"].strip()
-    ]
-
     cell_updates = []
     written = []
     skipped = []
 
-    for row in sheet_rows:
-        cf = row["campaign_filter"].strip().lower()
-        label = row["campaign_filter"].strip() or "Primary"
-
-        if cf:
-            matched = [c for c in db_campaigns if cf in c.campaign_name.lower()]
-        else:
-            matched = [
-                c for c in db_campaigns
-                if not any(f in c.campaign_name.lower() for f in named_filters)
-            ]
+    for assignment in _google_ads_row_assignments(sheet_rows, db_campaigns):
+        row = assignment["row"]
+        label = assignment["label"]
+        matched = assignment["matched"]
 
         logger.info(
             "Google Ads spend row match: account_id=%s row=%s label=%r filter=%r matched_count=%d matched_campaigns=%s",

@@ -143,6 +143,7 @@ def segment_spend_summaries(campaigns):
             'spend': round(row['spend'], 2),
             'current_daily': round(row['current_daily'], 2),
             'campaign_count': row['campaign_count'],
+            'pace_pct': round((row['spend'] / row['monthly']) * 100, 1) if row['monthly'] > 0 else 0.0,
         }
         for row in sorted(summaries.values(), key=lambda r: r['name'].lower())
     ]

@@ -140,6 +140,31 @@ def _allocated_recommendation(seg_rec, current_daily, seg_daily, seg_count):
     return round(seg_rec / seg_count, 2) if seg_count > 0 else round(seg_rec, 2)
 
 
+def _segment_summaries_from_maps(seg_budget_map, seg_spend_map, seg_daily_map, seg_count_map):
+    """Serialize one summary row per sheet segment."""
+    labels = sorted(
+        set(seg_budget_map.keys())
+        | set(seg_spend_map.keys())
+        | set(seg_daily_map.keys())
+        | set(seg_count_map.keys()),
+        key=lambda label: (label or 'Primary').lower(),
+    )
+    summaries = []
+    for label in labels:
+        budget = float(seg_budget_map.get(label, 0.0) or 0.0)
+        spend = float(seg_spend_map.get(label, 0.0) or 0.0)
+        current_daily = float(seg_daily_map.get(label, 0.0) or 0.0)
+        summaries.append({
+            'name': label,
+            'monthly': round(budget, 2),
+            'spend': round(spend, 2),
+            'current_daily': round(current_daily, 2),
+            'campaign_count': int(seg_count_map.get(label, 0) or 0),
+            'pace_pct': round((spend / budget) * 100, 1) if budget > 0 else 0.0,
+        })
+    return summaries
+
+
 def _delete_today_pacing_data(campaigns, today):
     """Remove same-day snapshots before writing the fresh API-backed run."""
     campaign_ids = [c.id for c in campaigns if c.id]
@@ -477,6 +502,9 @@ def run_pacing(account_id):
         'decrease': sum(1 for r in recommendations if r['status'] == 'DECREASE'),
         'on_pace': sum(1 for r in recommendations if r['status'] == 'ON_PACE'),
     }
+    segment_summaries = _segment_summaries_from_maps(
+        seg_budget_map, seg_spend_map, seg_daily_map, seg_count_map
+    )
 
     # 5. Check auto-pause threshold
     # Grant accounts are exempt from auto-pause (they can safely exceed caps).
@@ -503,6 +531,9 @@ def run_pacing(account_id):
     return jsonify({
         'recommendations': recommendations,
         'summary': summary,
+        'segment_summaries': segment_summaries,
+        'mtd_spend': round(sum(seg_spend_map.values()), 2),
+        'total_monthly_budget': round(sum(seg_budget_map.values()), 2),
         'sheet_sync': sheet_sync,
         'sheet_write': sheet_write,
         'auto_pause_warning': auto_pause_triggered,
@@ -973,5 +1004,8 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
 
     return {
         'processed': processed,
+        'segment_summaries': _segment_summaries_from_maps(
+            seg_budget_map, seg_spend_map, seg_daily_map, seg_count_map
+        ),
         'segment_spend_by_label': {k: round(v, 2) for k, v in seg_spend_map.items()},
     }
