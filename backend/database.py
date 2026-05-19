@@ -195,11 +195,16 @@ class Campaign(db.Model):
     def is_visible(self):
         """True if the campaign should appear in dashboard views.
 
-        Visible = currently live (is_active=True) OR was inactive but spent
-        money this month (paused/ended mid-month). Dead campaigns with no
-        spend this month are hidden.
+        Visible ONLY if the campaign actually spent money this calendar
+        month. Google Ads frequently leaves old campaigns set to ENABLED
+        for years even after they stop running — `is_active` alone lets
+        those zombies pollute the dashboard. Spend is the only reliable
+        signal that a campaign actually ran this month.
+
+        Trade-off: a brand-new campaign with $0 spend so far won't appear
+        until its first spend rolls in (typically same day).
         """
-        return bool(self.is_active) or self.has_spend_this_month()
+        return self.has_spend_this_month()
 
     def to_dict(self):
         campaign_rows = sorted(

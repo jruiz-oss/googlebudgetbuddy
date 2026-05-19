@@ -166,11 +166,11 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
-### 2026-05-18 — Home dashboard hides dead campaigns
-**What:** Old/inactive campaigns with no spend this month were still appearing on the Home dashboard, even though the per-account view already filtered them out.
-**Why:** `Account.to_dict()` returned ALL campaigns in its `campaigns` array, and its summary metrics (`campaign_count`, `total_monthly_budget`, `pacing_status`) only filtered on `is_active`. That was inconsistent with `GET /api/campaigns/account/<id>`, which used "is_active OR spent-this-month".
+### 2026-05-18 — Dashboard shows only campaigns that spent this month
+**What:** Old campaigns kept appearing on both the Home dashboard and per-account view. Google Ads leaves campaigns set to ENABLED for years after they stop running, so the old "is_active OR spent-this-month" filter still let zombies through.
+**Why:** `is_active` is unreliable — it just mirrors the Google Ads status flag. The only trustworthy signal that a campaign actually ran is spend > 0 this calendar month. Trade-off accepted: brand-new campaigns with $0 spend won't show until their first spend (usually same day).
 **Changes:**
-- `backend/database.py`: Added `Campaign.has_spend_this_month()` and `Campaign.is_visible()` helpers (visible = `is_active` OR spend > 0 this calendar month). `Account.to_dict()` now uses `is_visible()` for both the summary calcs and the `campaigns` array.
+- `backend/database.py`: Added `Campaign.has_spend_this_month()` and `Campaign.is_visible()` helpers. `is_visible()` returns `has_spend_this_month()` only — the `is_active` OR branch was removed because ENABLED status alone wasn't a useful signal. `Account.to_dict()` now uses `is_visible()` for both the summary calcs (`campaign_count`, `total_monthly_budget`, `pacing_status`) and the `campaigns` array.
 - `backend/routes/campaigns.py`: Removed the local `_has_spend_this_month` duplicate; `get_campaigns()` now calls `c.is_visible()`. Dropped the now-unused top-level `from datetime import datetime`.
 
 ### 2026-05-19 — run-all timeout fix (background thread + Gunicorn bump)
