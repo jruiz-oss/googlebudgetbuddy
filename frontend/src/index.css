@@ -1139,3 +1139,219 @@ html, body {
 .bb-empty-actions { display: flex; gap: 8px; }
 @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
 .bb-skeleton { background: linear-gradient(90deg, #f0eee9 25%, #e6e3db 50%, #f0eee9 75%); background-size: 800px 100%; animation: shimmer 1.5s infinite; border-radius: var(--r-sm); }
+
+/* ── Responsive breakpoints ───────────────────────────────────────────── */
+
+/* 1200px — slightly narrower desktop: 3-col cards, tighten padding */
+@media (max-width: 1200px) {
+  .cards-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .page-content {
+    padding: 18px 20px 60px;
+  }
+}
+
+/* 900px — small laptop / large tablet landscape */
+@media (max-width: 900px) {
+  :root {
+    --color-sidebar-w: 200px;
+  }
+
+  .cards-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .summary {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .summary .cell:nth-child(n+4) {
+    border-top: 1px solid var(--line);
+  }
+
+  .statgrid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .set-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .page-content {
+    padding: 16px 16px 60px;
+  }
+  .topbar {
+    padding: 10px 16px;
+  }
+}
+
+/* 768px — tablet portrait: collapse sidebar to icon rail */
+@media (max-width: 768px) {
+  :root {
+    --color-sidebar-w: 52px;
+  }
+
+  .shell {
+    grid-template-columns: var(--color-sidebar-w) 1fr;
+  }
+
+  /* Hide text labels in sidebar, keep icons */
+  .sidebar {
+    padding: 12px 8px;
+    align-items: center;
+  }
+  .sidebar-brand .name,
+  .sidebar-brand .sub,
+  .nav-section-label,
+  .sidebar-user .info,
+  .recent-account-item span,
+  .nav-item span:not(.nav-badge) {
+    display: none;
+  }
+  .sidebar-brand {
+    padding: 8px 0 12px;
+    justify-content: center;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 7px;
+    width: 100%;
+  }
+  .sidebar-user {
+    justify-content: center;
+    padding: 10px 0 4px;
+  }
+  .recent-account-item {
+    justify-content: center;
+    padding: 5px;
+  }
+  .nav-badge {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    margin-left: 0;
+    padding: 1px 4px;
+    font-size: 9px;
+  }
+
+  .cards-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .summary .cell:nth-child(n+3) {
+    border-top: 1px solid var(--line);
+  }
+  /* 5th cell spans full width */
+  .summary .cell:nth-child(5) {
+    grid-column: span 2;
+    border-right: none;
+  }
+
+  .statgrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  /* 5th stat spans full width */
+  .statgrid .s:nth-child(5) {
+    grid-column: span 2;
+  }
+
+  .detail-head {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .detail-head .dactions {
+    margin-left: 0;
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .topbar {
+    padding: 9px 12px;
+  }
+  .topbar .page-title {
+    font-size: var(--t-lg);
+  }
+
+  .page-content {
+    padding: 14px 12px 60px;
+  }
+
+  .filterbar {
+    gap: 8px;
+  }
+  .search-box {
+    width: 100%;
+  }
+}
+
+/* 480px — mobile: single column everything */
+@media (max-width: 480px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  /* Sidebar becomes a top bar on mobile */
+  .sidebar {
+    display: none;
+  }
+
+  .cards-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .summary {
+    grid-template-columns: 1fr 1fr;
+  }
+  .summary .cell:nth-child(5) {
+    grid-column: span 2;
+    border-right: none;
+  }
+
+  .statgrid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .statgrid .s:nth-child(5) {
+    grid-column: span 2;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .set-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .modal {
+    width: 100%;
+    max-width: 100vw;
+    border-radius: var(--r);
+    padding: 18px;
+  }
+
+  .topbar {
+    padding: 9px 12px;
+  }
+  .topbar .page-title {
+    font-size: var(--t-md);
+  }
+  .topbar .day-label {
+    display: none;
+  }
+
+  .page-content {
+    padding: 12px 10px 60px;
+  }
+
+  .cap-control {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
