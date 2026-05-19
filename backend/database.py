@@ -89,11 +89,13 @@ class Account(db.Model):
                 'created_at': self.created_at.isoformat() if self.created_at else None,
             }
 
-        active_campaigns = [c for c in self.campaigns if c.is_active]
-        total_monthly_budget = sum((c.monthly_budget or 0) for c in active_campaigns)
+        # Visible = currently live OR spent money this month. Dead campaigns
+        # (inactive + $0 this month) are hidden from the dashboard entirely.
+        visible_campaigns = [c for c in self.campaigns if c.is_visible()]
+        total_monthly_budget = sum((c.monthly_budget or 0) for c in visible_campaigns)
 
         on_track = over_pacing = under_pacing = 0
-        for c in active_campaigns:
+        for c in visible_campaigns:
             rows = sorted(
                 (p for p in (c.pacing_data or [])),
                 key=lambda r: (r.date or datetime.min.date(), r.id or 0),
@@ -121,7 +123,7 @@ class Account(db.Model):
             'google_customer_id': self.google_customer_id,
             'mcc_customer_id': self.mcc_customer_id,
             'created_at': self.created_at.isoformat(),
-            'campaign_count': len(active_campaigns),
+            'campaign_count': len(visible_campaigns),
             'total_monthly_budget': round(total_monthly_budget, 2),
             'status_category': status_category,
             'pacing_status': {
@@ -130,7 +132,7 @@ class Account(db.Model):
                 'under_pacing': under_pacing,
             },
             'settings': self.settings.to_dict() if self.settings else None,
-            'campaigns': [c.to_dict() for c in self.campaigns],
+            'campaigns': [c.to_dict() for c in visible_campaigns],
         }
 
 
@@ -181,6 +183,23 @@ class Campaign(db.Model):
             else:
                 return 'active'
         return 'pending'
+
+    def has_spend_this_month(self):
+        """True if this campaign has any PacingData spend > 0 in the current calendar month."""
+        month_start = datetime.utcnow().date().replace(day=1)
+        return any(
+            p.actual_spend and p.actual_spend > 0 and p.date and p.date >= month_start
+            for p in (self.pacing_data or [])
+        )
+
+    def is_visible(self):
+        """True if the campaign should appear in dashboard views.
+
+        Visible = currently live (is_active=True) OR was inactive but spent
+        money this month (paused/ended mid-month). Dead campaigns with no
+        spend this month are hidden.
+        """
+        return bool(self.is_active) or self.has_spend_this_month()
 
     def to_dict(self):
         campaign_rows = sorted(

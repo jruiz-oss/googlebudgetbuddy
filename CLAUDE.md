@@ -166,6 +166,13 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-18 — Home dashboard hides dead campaigns
+**What:** Old/inactive campaigns with no spend this month were still appearing on the Home dashboard, even though the per-account view already filtered them out.
+**Why:** `Account.to_dict()` returned ALL campaigns in its `campaigns` array, and its summary metrics (`campaign_count`, `total_monthly_budget`, `pacing_status`) only filtered on `is_active`. That was inconsistent with `GET /api/campaigns/account/<id>`, which used "is_active OR spent-this-month".
+**Changes:**
+- `backend/database.py`: Added `Campaign.has_spend_this_month()` and `Campaign.is_visible()` helpers (visible = `is_active` OR spend > 0 this calendar month). `Account.to_dict()` now uses `is_visible()` for both the summary calcs and the `campaigns` array.
+- `backend/routes/campaigns.py`: Removed the local `_has_spend_this_month` duplicate; `get_campaigns()` now calls `c.is_visible()`. Dropped the now-unused top-level `from datetime import datetime`.
+
 ### 2026-05-19 — run-all timeout fix (background thread + Gunicorn bump)
 **What:** Fixed Gunicorn worker timeout killing the "Run All" pacing job on larger MCCs.
 **Why:** With 15+ accounts, sequential Google Ads API calls exceed the old 120s worker limit.

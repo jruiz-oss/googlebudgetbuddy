@@ -3,7 +3,6 @@ Campaign routes — list, update, remove tracked campaigns, pacing history chart
 """
 
 import logging
-from datetime import datetime
 
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
@@ -19,16 +18,24 @@ campaigns_bp = Blueprint('campaigns', __name__, url_prefix='/api/campaigns')
 @campaigns_bp.route('/account/<int:account_id>', methods=['GET'])
 @login_required
 def get_campaigns(account_id):
-    """Return all tracked campaigns for an account."""
+    """Return campaigns for an account that should be visible in the dashboard.
+
+    Includes:
+      - is_active=True  (ENABLED + not expired — set during sync)
+      - is_active=False but has spend > 0 this month (paused/ended mid-month)
+
+    Dead campaigns (inactive, $0 spend this month) are excluded.
+    """
     Account.query.get_or_404(account_id)
-    campaigns = (
+    all_campaigns = (
         Campaign.query
         .options(selectinload(Campaign.pacing_data))
-        .filter_by(account_id=account_id, is_active=True)
+        .filter_by(account_id=account_id)
         .order_by(Campaign.campaign_name)
         .all()
     )
-    return jsonify({'campaigns': [c.to_dict() for c in campaigns]})
+    visible = [c for c in all_campaigns if c.is_visible()]
+    return jsonify({'campaigns': [c.to_dict() for c in visible]})
 
 
 @campaigns_bp.route('/all', methods=['GET'])
