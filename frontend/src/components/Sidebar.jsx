@@ -34,10 +34,6 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
       {/* Brand */}
       <div className="sidebar-brand">
         <Logo size={72} />
-        <div>
-          <div className="name">BudgetBuddy</div>
-          <div className="sub">Google Ads pacing</div>
-        </div>
       </div>
 
       {/* Workspace nav */}
