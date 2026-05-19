@@ -183,8 +183,10 @@ function ApplyModal({ item, onClose, onConfirm }) {
     );
   }
   const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
-  const diff = Math.abs(pace.dailyRec - pace.dailyCurrent);
-  const dir  = pace.dailyRec > pace.dailyCurrent ? 'increase' : 'decrease';
+  // Use backend-computed rec if passed (item.rec), otherwise fall back to frontend calc.
+  const newDaily = item.rec != null ? item.rec : pace.dailyRec;
+  const diff = Math.abs(newDaily - pace.dailyCurrent);
+  const dir  = newDaily > pace.dailyCurrent ? 'increase' : 'decrease';
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
@@ -193,7 +195,7 @@ function ApplyModal({ item, onClose, onConfirm }) {
         <div className="diff-card">
           <div className="dcol from"><div className="dk">Current daily</div><div className="dv">{fmt(pace.dailyCurrent)}</div></div>
           <div className="darrow"><ArrowRight size={14} /></div>
-          <div className="dcol"><div className="dk">New daily</div><div className="dv" style={{ color: 'var(--green)' }}>{fmt(pace.dailyRec)}</div></div>
+          <div className="dcol"><div className="dk">New daily</div><div className="dv" style={{ color: 'var(--green)' }}>{fmt(newDaily)}</div></div>
         </div>
         <div className="mcopy">{dir === 'increase' ? `An increase of ${fmt(diff)}/day to catch up.` : `A decrease of ${fmt(diff)}/day to stay within the monthly target.`} Calculated over the remaining {daysLeft} days.</div>
         <div className="footer-row">
@@ -367,12 +369,9 @@ export default function AccountDashboard({ onPacingComplete }) {
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
         toast.success(r.data.message);
       } else {
-        // Single-budget or per-segment apply — compute from current campaign data.
+        // Single-budget or per-segment apply.
         // item.segmentOf is set when this is a per-segment row; item.name is the segment label.
         // For single-budget accounts item.segmentOf is undefined — use all campaigns.
-        const { daysIn, daysInMonth } = getDaysInfo();
-        const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
-
         const segLabel = item.segmentOf ? item.name : null;
         const eligible = campaigns.filter(c =>
           c.budget_resource_name &&
@@ -384,11 +383,18 @@ export default function AccountDashboard({ onPacingComplete }) {
           return;
         }
 
-        const perCampaign = Math.round((pace.dailyRec / eligible.length) * 100) / 100;
+        // Use each campaign's backend-stored recommended daily budget (already segment-split).
+        // Fall back to an equal split of the frontend-calculated rec only if no pacing data exists.
+        const hasPacingData = eligible.some(c => c.latest_pacing?.recommended_daily_budget != null);
+        const { daysIn: di, daysInMonth: dim } = getDaysInfo();
+        const fallbackRec = computePace(item.monthly, item.spend, di, dim).dailyRec;
+        const fallbackPerCampaign = Math.round((fallbackRec / eligible.length) * 100) / 100;
         const adjustments = eligible.map(c => ({
           campaign_id:          c.id,
           budget_resource_name: c.budget_resource_name,
-          new_daily_budget:     perCampaign,
+          new_daily_budget:     hasPacingData
+            ? (c.latest_pacing?.recommended_daily_budget ?? fallbackPerCampaign)
+            : fallbackPerCampaign,
         }));
 
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
@@ -432,6 +438,12 @@ export default function AccountDashboard({ onPacingComplete }) {
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
   const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
+
+  // Use the backend's stored per-campaign recommendations (already segment-aware and
+  // correctly split). Sum them to get the account-level recommended daily.
+  // Fall back to the frontend formula only when there's no pacing data yet.
+  const recFromBackend = campaigns.reduce((s, c) => s + (c.latest_pacing?.recommended_daily_budget || 0), 0);
+  const displayRec = recFromBackend > 0 ? recFromBackend : pace.dailyRec;
   const hasSheetId = Boolean(account.settings?.google_sheet_id);
   const lastSyncStr = lastSync ? (() => { const mins = Math.round((Date.now() - lastSync) / 60000); return mins < 1 ? 'just now' : `${mins}m ago`; })() : 'not yet this session';
 
@@ -466,7 +478,7 @@ export default function AccountDashboard({ onPacingComplete }) {
           <button className="btn small" onClick={runPacing} disabled={running}><Play size={13} /> {running ? 'Running…' : 'Run Pacing'}</button>
           {isSegmented
             ? <button className="btn primary" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>{applying ? 'Applying…' : 'Apply all recommended'}</button>
-            : <button className="btn primary" onClick={() => setApplyItem({ name: account.account_name, monthly, spend })}>Set daily to {fmt(pace.dailyRec)}</button>}
+            : <button className="btn primary" onClick={() => setApplyItem({ name: account.account_name, monthly, spend, rec: displayRec })}>Set daily to {fmt(displayRec)}</button>}
         </div>
       </div>
 
@@ -475,7 +487,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="s"><div className="sk">MTD Spend</div><div className="sv">{fmt(spend)}</div><div className="ssub">{pace.pctOfBudget.toFixed(0)}% of monthly · thru d{daysIn}</div></div>
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
         <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(pace.dailyCurrent)}</div><div className="ssub">avg of {daysIn} days</div></div>
-        <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(pace.dailyRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
+        <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
         <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">{pace.status === 'over' ? 'ahead of pace' : pace.status === 'under' ? 'behind pace' : 'within ±5%'}</div></div>
       </div>
 
