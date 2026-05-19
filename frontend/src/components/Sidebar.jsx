@@ -33,7 +33,7 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
     <aside className="sidebar">
       {/* Brand */}
       <div className="sidebar-brand">
-        <Logo size={72} />
+        <Logo size={144} />
       </div>
 
       {/* Workspace nav */}
