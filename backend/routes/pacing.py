@@ -226,7 +226,16 @@ def run_pacing(account_id):
             )
         }), 502
 
-    # Include inactive campaigns only if they spent money this month
+    # Only pace live campaigns that actually spent money this month.
+    # Many Google Ads accounts have years of old ENABLED campaigns that have
+    # never been deleted — they're is_active=True but have $0 MTD spend.
+    # Including them inflates seg_count and splits recommendations across
+    # phantom campaigns.  Mirrors the dashboard's is_visible() logic.
+    live_campaigns = [
+        c for c in live_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    # Also include inactive (paused/expired) campaigns that did spend this month
     spending_inactive = [
         c for c in inactive_campaigns
         if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
@@ -746,7 +755,12 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         db.session.commit()
         return
 
-    # Inactive campaigns with this-month spend get included in pacing
+    # Only pace live campaigns that actually spent money this month (mirrors run_pacing route).
+    live_campaigns = [
+        c for c in live_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    # Also include inactive (paused/expired) campaigns that did spend this month
     spending_inactive = [
         c for c in inactive_campaigns
         if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
