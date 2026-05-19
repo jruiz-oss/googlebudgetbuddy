@@ -7,7 +7,9 @@ import { useToast } from '../components/Toast';
 // ── Pacing math ──────────────────────────────────────────────────────────
 function getDaysInfo() {
   const today       = new Date();
-  const daysIn      = today.getDate();
+  // Spend data from Google Ads is through EOD of the prior day, not the current day.
+  // Use yesterday's day number so ideal-spend and % DIFF calculations match the sheet.
+  const daysIn      = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
   return { daysIn, daysInMonth, daysLeft: daysInMonth - daysIn };
 }
@@ -241,7 +243,7 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
             <div className="card-name" title={account.account_name}>{account.account_name}</div>
             <div className="card-meta">{isSegmented ? `${segments.length} segments` : 'single budget'}</div>
           </div>
-          <span className={`pill ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</span>
+          <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
         </div>
 
         <PaceBar spend={spend} monthly={monthly} daysIn={daysIn} daysInMonth={daysInMonth} status={pace.status} />
@@ -286,7 +288,8 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       if (pace.status === 'warn')  under++;
     }
     const portfolioDelta = totalIdeal > 0 ? ((totalSpend / totalIdeal) - 1) * 100 : 0;
-    const portfolioPace = totalMonthly > 0 ? (totalSpend / totalMonthly) * 100 : 0;
+    // Portfolio pace shown as % DIFF (same formula as sheet col I) rather than % of budget used.
+    const portfolioPace = portfolioDelta;
     const absPD   = Math.abs(portfolioDelta);
     const pStatus = absPD > 10 ? 'over' : absPD > 5 ? 'warn' : 'green';
     return { totalMonthly, totalSpend, totalIdeal, portfolioDelta, portfolioPace, pStatus, over, under };
@@ -301,7 +304,7 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       </div>
       <div className="cell">
         <div className="k">Portfolio pace</div>
-        <div className={`v ${stats.pStatus}`}>{fmtPlainPct(stats.portfolioPace)}</div>
+        <div className={`v ${stats.pStatus}`}>{fmtPct(stats.portfolioPace)}</div>
         <div className="sub">{fmt(stats.totalSpend)} / {fmt(stats.totalMonthly)}</div>
       </div>
       <div className="cell">

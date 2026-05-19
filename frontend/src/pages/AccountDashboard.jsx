@@ -7,7 +7,9 @@ import { useToast } from '../components/Toast';
 // ── Pacing math ──────────────────────────────────────────────────────────
 function getDaysInfo() {
   const today       = new Date();
-  const daysIn      = today.getDate();
+  // Spend data from Google Ads is through EOD of the prior day, not the current day.
+  // Use yesterday's day number so ideal-spend and % DIFF calculations match the sheet.
+  const daysIn      = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
   return { daysIn, daysInMonth, daysLeft: daysInMonth - daysIn };
 }
@@ -563,7 +565,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             <span style={{ color: 'var(--line-2)' }}>·</span>
             day {daysIn} of {daysInMonth}
             <span style={{ color: 'var(--line-2)' }}>·</span>
-            <span className={`pill ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</span>
+            <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
           </div>
         </div>
         <div className="dactions">
@@ -583,7 +585,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
         <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(currentDailyTotal)}</div><div className="ssub">live Google Ads budgets</div></div>
         <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
-        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPlainPct(pace.pacePct)}</div><div className="ssub">of monthly budget used</div></div>
+        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">vs ideal pace (% DIFF)</div></div>
       </div>
 
       {/* Two-column */}
@@ -644,7 +646,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                             <span style={{ fontWeight: 500 }}>{s.name}</span>
                           </div>
                         </td>
-                        <td><span className={`pill ${sp.status}`}>{fmtPlainPct(sp.pacePct)}</span></td>
+                        <td><span className={`pill ${sp.status}`}>{fmtPct(sp.deltaPct)}</span></td>
                         <td>{fmt(s.spend)}</td>
                         <td>{fmt(s.monthly)}</td>
                         <td>{fmt(s.currentDaily)}</td>

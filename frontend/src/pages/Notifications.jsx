@@ -9,7 +9,8 @@ function campaignKey(c) {
 // Generate notifications from real account pacing data
 function buildNotifications(accounts) {
   const today = new Date();
-  const daysIn = today.getDate();
+  // Spend data from Google Ads is through EOD of the prior day.
+  const daysIn = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
   const THRESHOLD = 5;
   const noti = [];

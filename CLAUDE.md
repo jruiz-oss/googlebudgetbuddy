@@ -173,6 +173,19 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-19 — Fix Pace % formula and days-elapsed off-by-one
+**What:** Changed displayed Pace % to match the sheet's % DIFF column (I), and fixed `daysIn` to use the prior day since spend is through EOD of the prior day.
+**Why:** The app showed `spend / budget` (sheet column G "% Through Month") instead of the sheet's more actionable `% DIFF = (projected_monthly − budget) / budget`. Additionally, `daysIn` used `today.getDate()` (e.g. 19) while Google Ads spend only reflects through EOD of day 18, making ideal-spend projections 1 day off.
+**Sheet formulas mapped:**
+- G (% Through Month): `=D/C` (spend/budget) — NOT what we display
+- H (On Track): `=D * days_in_month / days_elapsed` — projected full-month spend
+- I (% DIFF): `=(H−C)/C` = `(spend * daysInMonth / daysIn − budget) / budget` — ✅ now displayed as Pace %
+- E (Daily Rec): `=(C−D) / days_in_month` — already correct, unchanged
+**Changes:**
+- `frontend/src/pages/AccountDashboard.jsx`: `getDaysInfo()` now uses `Math.max(today.getDate()-1, 1)`. Pace pill and stat grid "Pace" now display `fmtPct(pace.deltaPct)` (% DIFF with +/− sign). Segment table pace column same. Label updated to "vs ideal pace (% DIFF)".
+- `frontend/src/pages/Home.jsx`: Same `daysIn` fix. Account card pace pill uses `deltaPct`. Portfolio pace uses `portfolioDelta` (% DIFF at portfolio level) instead of `totalSpend/totalMonthly`.
+- `frontend/src/pages/Notifications.jsx`: Same `daysIn` fix.
+
 ### 2026-05-19 — Fix segmented account rollups
 **What:** Made segmented account dashboards and sheet writeback treat each sheet segment as one rollup that can contain multiple campaigns.
 **Why:** Segmented accounts could show MTD mismatches or appear to split one segment into campaign-level subsegments when campaign filters overlapped or the account dashboard rebuilt segment totals from campaign rows.
