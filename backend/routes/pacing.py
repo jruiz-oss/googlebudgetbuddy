@@ -271,16 +271,26 @@ def run_pacing(account_id):
     seg_count_map   = defaultdict(int)     # label → number of campaigns
     seg_budget_map  = {}                   # label → segment monthly budget
 
+    # Deduplicate spend by google_campaign_id — if two DB campaign rows share the
+    # same Google campaign ID (e.g. an active + a duplicate/re-imported row), the
+    # API returns one spend value for that ID. Without dedup, both rows claim the
+    # same spend and double-count it in seg_spend_map.
+    _counted_gids = set()  # google_campaign_ids already added to seg_spend_map
+
     for _c in active_campaigns:
         _label = _c.budget_label or 'Primary'
-        _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
         _latest = sorted(
             _c.pacing_data,
             key=lambda r: (r.date or datetime.min.date(), r.id or 0),
         )
         _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
 
-        seg_spend_map[_label]  += _cspend
+        # Only add spend once per unique Google campaign ID to avoid double-counting.
+        if _c.google_campaign_id not in _counted_gids:
+            _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
+            seg_spend_map[_label] += _cspend
+            _counted_gids.add(_c.google_campaign_id)
+
         seg_daily_map[_label]  += _cdaily
         seg_count_map[_label]  += 1
         # Use max so an inactive campaign with monthly_budget=0 never overwrites
@@ -789,16 +799,22 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
     seg_count_map  = defaultdict(int)
     seg_budget_map = {}
 
+    # Deduplicate spend by google_campaign_id (same fix as in run_pacing route).
+    _counted_gids = set()
+
     for _c in active_campaigns:
         _label = _c.budget_label or 'Primary'
-        _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
         _latest = sorted(
             _c.pacing_data,
             key=lambda r: (r.date or datetime.min.date(), r.id or 0),
         )
         _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
 
-        seg_spend_map[_label]  += _cspend
+        if _c.google_campaign_id not in _counted_gids:
+            _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
+            seg_spend_map[_label] += _cspend
+            _counted_gids.add(_c.google_campaign_id)
+
         seg_daily_map[_label]  += _cdaily
         seg_count_map[_label]  += 1
         # Use max so an inactive campaign with monthly_budget=0 never overwrites

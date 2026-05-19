@@ -439,11 +439,13 @@ export default function AccountDashboard({ onPacingComplete }) {
   const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
 
-  // Use the backend's stored per-campaign recommendations (already segment-aware and
-  // correctly split). Sum them to get the account-level recommended daily.
-  // Fall back to the frontend formula only when there's no pacing data yet.
-  const recFromBackend = campaigns.reduce((s, c) => s + (c.latest_pacing?.recommended_daily_budget || 0), 0);
-  const displayRec = recFromBackend > 0 ? recFromBackend : pace.dailyRec;
+  // Always compute recommended daily fresh from the current budget and spend.
+  // Relying on recFromBackend (stored DB value) causes stale recommendations to
+  // persist across runs — if a previous run stored a wrong value (e.g. from a
+  // formula bug or duplicate-spend issue), that positive value would override the
+  // correct live formula.  The formula is: max(0, monthly - spend) / daysInMonth,
+  // which is identical to what the Google Sheet uses.
+  const displayRec = pace.dailyRec;
   const hasSheetId = Boolean(account.settings?.google_sheet_id);
   const lastSyncStr = lastSync ? (() => { const mins = Math.round((Date.now() - lastSync) / 60000); return mins < 1 ? 'just now' : `${mins}m ago`; })() : 'not yet this session';
 

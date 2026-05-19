@@ -1517,9 +1517,13 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
     ws, tab_name = _open_month_worksheet(spreadsheet)
     sheet_rows = _get_google_ads_section(ws, account.account_name)
 
-    db_campaigns = Campaign.query.filter_by(account_id=account_id, is_active=True).all()
+    # Include ALL campaigns (active + inactive) so the spend written to the sheet
+    # matches what the pacing run computes. Using is_active=True only caused the
+    # sheet to show a lower spend than the app whenever inactive campaigns had
+    # MTD spend (e.g. campaigns paused mid-month).
+    db_campaigns = Campaign.query.filter_by(account_id=account_id).all()
     logger.info(
-        "Google Ads spend write start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d active_campaigns=%d",
+        "Google Ads spend write start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d all_campaigns=%d",
         account.id,
         account.account_name,
         tab_name,

@@ -166,6 +166,16 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-19 — Fix spend double-counting + stale recommendation display
+**What:** Fixed three bugs causing the app to show $12,042 MTD spend (should be $6,021) and $4,281 recommended daily (should be $128) for Goodwill AZ - Retail Grant and potentially other accounts.
+**Bug 1 — Spend double-counted via duplicate google_campaign_id:** The `seg_spend_map` loop in `run_pacing` and `run_pacing_for_account` ran once per DB campaign row. If two DB rows share the same `google_campaign_id` (e.g. an active + a re-imported duplicate), the API returns one spend value for that ID but both rows claimed it, doubling the segment spend. Fixed by tracking a `_counted_gids` set and only adding spend to `seg_spend_map` the first time each `google_campaign_id` is seen.
+**Bug 2 — Stale `recFromBackend` overriding live formula:** `AccountDashboard.jsx` used `recFromBackend > 0 ? recFromBackend : pace.dailyRec`. Any positive DB recommendation (even from a run with wrong data) silently overrode the fresh formula. Fixed by always using `pace.dailyRec` (`max(0, monthly - spend) / daysInMonth`) which matches the Google Sheet formula exactly.
+**Bug 3 — Sheet write-back excluded inactive campaigns:** `write_google_ads_spend_for_account` queried only `is_active=True` campaigns, but pacing includes inactive campaigns with MTD spend. This caused the sheet to show a lower spend than the app. Fixed by querying all campaigns (matching budget sync behavior).
+**Changes:**
+- `backend/routes/pacing.py`: Added `_counted_gids` set in both `run_pacing` and `run_pacing_for_account` to deduplicate `seg_spend_map` by `google_campaign_id`.
+- `frontend/src/pages/AccountDashboard.jsx`: Removed `recFromBackend` logic; `displayRec` now always equals `pace.dailyRec`.
+- `backend/routes/sheets.py`: `write_google_ads_spend_for_account` now queries all campaigns (not `is_active=True` only).
+
 ### 2026-05-19 — Fix "Set daily to $0" + math mismatch with Google Sheet
 **What:** Fixed two related bugs causing every account to show "Set daily to $0" and recommended budget numbers that didn't match the Google Sheet.
 **Bug 1 — Inactive campaign overwrites segment budget:** `seg_budget_map` (pacing.py) and `segBudgets`/`getSegments` (Home.jsx, AccountDashboard.jsx) used last-value-wins when iterating campaigns in a segment. An inactive campaign with `monthly_budget=0` (excluded from the sheet sync) appearing after an active campaign silently reset the segment budget to 0, causing `max(0, budget - spend) = 0`. Fixed by using `Math.max` so only the highest (correct) budget in a segment is used.
