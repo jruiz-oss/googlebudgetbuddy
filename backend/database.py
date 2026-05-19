@@ -71,27 +71,42 @@ def visible_latest_campaigns(campaigns):
       These are campaigns that ended in a prior month and ran up no spend this month.
       Google Ads frequently leaves such campaigns ENABLED indefinitely; relying on is_active
       alone lets them pollute dashboards and segment totals.
+    - Campaigns that have pacing history from any prior run but $0 spend in the latest run.
+      These are stale/ended campaigns that were correctly excluded from the most recent
+      pacing job — they must not re-appear as "brand-new" just because today's run
+      didn't write a snapshot for them.
 
     Included:
-    - Active (is_active=True) campaigns that are not zombies (no end_date, or ended this month).
-    - Any campaign (active or not) that has spend recorded in the latest pacing run.
+    - Any campaign with spend > 0 in the most recent pacing run.
       This covers campaigns that ended mid-month but did spend before ending.
+    - Truly brand-new campaigns: active, no pacing history at all, and not ended
+      before the current month (google_end_date check).
     """
+    from datetime import date as _date
     canonical = canonical_campaigns(campaigns)
     latest_date = latest_pacing_date(canonical)
+    month_start = _date.today().replace(day=1)
     visible = []
     for campaign in canonical:
         latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
-        has_spend_latest = latest and (latest.actual_spend or 0) > 0
-        has_been_paced   = latest is not None
+        has_spend_latest  = latest and (latest.actual_spend or 0) > 0
+        # "has_ever_been_paced" uses ALL pacing history, not just today's run.
+        # This prevents a campaign that was paced last month (but skipped today
+        # because it's ended/zombie) from falling into the brand-new branch.
+        has_ever_been_paced = bool(campaign.pacing_data)
 
         if has_spend_latest:
             # Has spend in the most recent run → always show
             visible.append(campaign)
-        elif not has_been_paced and campaign.is_active:
-            # Never been paced + marked active → brand-new campaign, show it
-            visible.append(campaign)
-        # else: has been paced but $0 spend → zombie, skip
+        elif not has_ever_been_paced and campaign.is_active:
+            # Truly brand-new: never paced, active, and not ended before this month
+            ended_before_month = (
+                campaign.google_end_date is not None
+                and campaign.google_end_date < month_start
+            )
+            if not ended_before_month:
+                visible.append(campaign)
+        # else: has pacing history but $0 spend in latest run → zombie, skip
     return visible
 
 
