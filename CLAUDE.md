@@ -166,6 +166,13 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-19 — run-all timeout fix (background thread + Gunicorn bump)
+**What:** Fixed Gunicorn worker timeout killing the "Run All" pacing job on larger MCCs.
+**Why:** With 15+ accounts, sequential Google Ads API calls exceed the old 120s worker limit.
+**Changes:**
+- `backend/Procfile`: Bumped `--timeout 120` → `--timeout 300` as a safety net.
+- `backend/routes/pacing.py`: `run-all` now mirrors the MCC sync pattern — acquires `_pacing_all_lock`, spawns `_run_pacing_all_job()` in a background thread, returns 202 immediately. Returns 409 if already running. The background job calls `run_pacing_for_account()` per account (sheet sync + spend fetch + PacingData write).
+
 ### 2026-05-18 — Campaign liveness filter + paused-but-spending inclusion
 **What:** Fixed two related campaign filtering bugs.
 **Bug 1 — Zombie ENABLED campaigns:** Campaigns with status=ENABLED but a past `campaign.end_date` were being treated as live and included in pacing. Fix: `list_campaigns()` now fetches `campaign.end_date`; a new `_is_campaign_live()` helper in `accounts.py` sets `is_active = True` only for ENABLED campaigns with no end date or a future end date.
