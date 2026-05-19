@@ -186,16 +186,27 @@ def _is_zombie_campaign(campaign, today, api_spend):
     Without this check those campaigns pollute segment totals, count maps, and
     budget-ratio calculations even though they are functionally dead.
 
-    A campaign is a zombie when ALL of the following are true:
-      1. google_end_date is set and it's before the start of this month
-      2. The Google Ads API reports 0 MTD spend for this campaign this month
-    If the campaign ended *this* month but did spend money, it still counts.
+    Two detection paths:
+      1. google_end_date is set and < month_start AND api_spend == 0
+         (accurate — fires after a sync populates google_end_date)
+      2. Campaign has pacing history from a prior month AND api_spend == 0
+         (fallback — fires immediately on existing rows where google_end_date is NULL)
     """
-    if campaign.google_end_date is None:
-        return False
+    if (api_spend or 0) > 0:
+        return False  # has spend this month → never a zombie
+
     month_start = today.replace(day=1)
-    ended_before_month = campaign.google_end_date < month_start
-    return ended_before_month and (api_spend or 0) == 0
+
+    # Path 1: explicit end date
+    if campaign.google_end_date is not None:
+        return campaign.google_end_date < month_start
+
+    # Path 2: pacing history from a prior month = campaign existed and ran before,
+    # but has no spend this month → treat as zombie
+    return any(
+        p.date and p.date < month_start
+        for p in (campaign.pacing_data or [])
+    )
 
 
 def _campaigns_for_pacing(account, today, metrics_by_id):
