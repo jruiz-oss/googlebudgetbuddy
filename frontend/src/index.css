@@ -1142,6 +1142,82 @@ html, body {
 
 /* ── Responsive breakpoints ───────────────────────────────────────────── */
 
+/* 1920px — large / ultrawide monitors */
+@media (min-width: 1920px) {
+  :root {
+    --color-sidebar-w: 280px;
+    --t-xs:  13px;
+    --t-sm:  14px;
+    --t-md:  15px;
+    --t-lg:  17px;
+    --t-xl:  21px;
+    --t-2xl: 26px;
+    --t-3xl: 34px;
+  }
+  .page-content {
+    max-width: 1800px;
+    padding: 28px 40px 80px;
+  }
+  .topbar {
+    padding: 13px 40px;
+  }
+  .cards-grid {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 16px;
+  }
+  .summary {
+    grid-template-columns: repeat(5, 1fr);
+  }
+  .statgrid {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  .card-inner {
+    padding: 14px 16px;
+    gap: 11px;
+  }
+  .statgrid .s {
+    padding: 14px 16px;
+  }
+  .summary .cell {
+    padding: 18px 20px;
+  }
+}
+
+/* 1440px — large desktop */
+@media (min-width: 1440px) and (max-width: 1919px) {
+  :root {
+    --color-sidebar-w: 256px;
+    --t-xs:  12px;
+    --t-sm:  13px;
+    --t-md:  14px;
+    --t-lg:  16px;
+    --t-xl:  19px;
+    --t-2xl: 24px;
+    --t-3xl: 30px;
+  }
+  .page-content {
+    max-width: 1520px;
+    padding: 24px 36px 80px;
+  }
+  .topbar {
+    padding: 12px 36px;
+  }
+  .cards-grid {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+  }
+  .statgrid {
+    gap: 12px;
+  }
+  .card-inner {
+    padding: 12px 14px;
+  }
+  .summary .cell {
+    padding: 16px 18px;
+  }
+}
+
 /* 1200px — slightly narrower desktop: 3-col cards, tighten padding */
 @media (max-width: 1200px) {
   .cards-grid {
