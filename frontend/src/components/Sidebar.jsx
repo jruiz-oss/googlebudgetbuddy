@@ -1,11 +1,18 @@
 import { NavLink, useNavigate } from 'react-router-dom';
-import { Activity, LayoutDashboard, LogOut, Settings, History, Users, Download } from 'lucide-react';
-import axios from 'axios';
+import { LayoutDashboard, Bell, Settings, LogOut } from 'lucide-react';
 import { useAuth } from '../App';
 import { useToast } from './Toast';
 
-export default function Sidebar() {
-  const { user, googleConnected, logout } = useAuth();
+function accountPaceStatus(account) {
+  const s = account.pacing_status;
+  if (s === 'over_pacing')  return 'over';
+  if (s === 'under_pacing') return 'under';
+  if (s === 'on_track')     return 'ok';
+  return 'none';
+}
+
+export default function Sidebar({ accounts = [], unreadCount = 0 }) {
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { addToast } = useToast();
 
@@ -18,47 +25,73 @@ export default function Sidebar() {
     }
   };
 
+  const initials = user?.email ? user.email.slice(0, 2).toUpperCase() : 'CA';
+  const recentAccounts = accounts.slice(0, 5);
+
   return (
-    <aside className="bb-sidebar">
+    <aside className="sidebar">
       {/* Brand */}
-      <div className="bb-sidebar-brand">
-        <span className="bb-brand-pill">
-          <Activity size={16} />
-        </span>
-        <span className="bb-brand-name">Google BudgetBuddy</span>
-      </div>
-
-      {/* Nav */}
-      <nav className="bb-nav">
-        <NavLink to="/" end className={({ isActive }) => `bb-nav-item${isActive ? ' is-active' : ''}`}>
-          <LayoutDashboard size={18} />
-          <span>Dashboard</span>
-        </NavLink>
-      </nav>
-
-      {/* Google connection status */}
-      <div className="bb-sidebar-section">
-        <p className="bb-sidebar-section-label">Google Ads</p>
-        <div className={`bb-pill ${googleConnected ? 'bb-pill-on' : 'bb-pill-muted'}`} style={{ fontSize: '12px', padding: '4px 10px' }}>
-          {googleConnected ? '● Connected' : '○ Not connected'}
+      <div className="sidebar-brand">
+        <div className="mark">B</div>
+        <div>
+          <div className="name">BudgetBuddy</div>
+          <div className="sub">Google Ads pacing</div>
         </div>
-        {!googleConnected && (
-          <p className="bb-muted" style={{ fontSize: '12px', marginTop: '6px' }}>
-            Connect via an account's Settings page.
-          </p>
-        )}
       </div>
 
-      {/* Footer */}
-      <div className="bb-sidebar-footer">
-        {user && (
-          <p className="bb-muted" style={{ fontSize: '12px', marginBottom: '8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {user.email}
-          </p>
-        )}
-        <button className="bb-btn bb-btn-ghost" onClick={handleLogout} style={{ width: '100%', justifyContent: 'flex-start', gap: '8px' }}>
-          <LogOut size={16} />
-          Logout
+      {/* Workspace nav */}
+      <div className="nav-section-label">Workspace</div>
+
+      <NavLink to="/" end className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+        <LayoutDashboard size={15} />
+        Dashboard
+      </NavLink>
+
+      <NavLink to="/notifications" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+        <Bell size={15} />
+        Notifications
+        {unreadCount > 0 && <span className="nav-badge">{unreadCount}</span>}
+      </NavLink>
+
+      <NavLink to="/settings" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+        <Settings size={15} />
+        Settings
+      </NavLink>
+
+      {/* Recent accounts */}
+      {recentAccounts.length > 0 && (
+        <>
+          <div className="nav-section-label" style={{ marginTop: '10px' }}>Recent Accounts</div>
+          {recentAccounts.map(a => (
+            <div
+              key={a.id}
+              className="recent-account-item"
+              onClick={() => navigate(`/accounts/${a.id}`)}
+            >
+              <span className={`status-dot ${accountPaceStatus(a)}`} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {a.account_name}
+              </span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* User block */}
+      <div className="sidebar-user">
+        <div className="avatar">{initials}</div>
+        <div className="info" style={{ flex: 1, minWidth: 0 }}>
+          <div className="uname">Commit Agency</div>
+          <div className="uemail" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {user?.email || ''}
+          </div>
+        </div>
+        <button
+          onClick={handleLogout}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: '2px', display: 'flex', flexShrink: 0 }}
+          title="Logout"
+        >
+          <LogOut size={14} />
         </button>
       </div>
     </aside>
