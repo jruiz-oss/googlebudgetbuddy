@@ -433,15 +433,25 @@ export default function Home({ onAccountsChange, accounts: propAccounts }) {
 
   const runAllPacing = async () => {
     setRunningAll(true);
-    toast.info(`Running pacing for ${accounts.length} account(s)…`);
+    toast.info(`Kicking off pacing for ${accounts.length} account(s)…`);
     try {
-      const r = await axios.post('/api/pacing/run-all');
-      const { accounts_ok, accounts_failed, total_campaigns_paced } = r.data;
-      if (accounts_failed > 0) toast.warn(`Pacing: ${accounts_ok} ok, ${accounts_failed} failed. ${total_campaigns_paced} campaigns.`);
-      else toast.success(`Pacing complete — ${accounts_ok} account(s), ${total_campaigns_paced} campaigns.`);
-      load(); onAccountsChange?.();
-    } catch (e) { toast.error(e.response?.data?.error || 'Run all pacing failed'); }
-    finally { setRunningAll(false); }
+      await axios.post('/api/pacing/run-all');
+      // Backend returns 202 immediately — actual pacing runs in a background thread.
+      // Keep the button disabled and auto-refresh once the job should be done.
+      toast.info('Pacing running in background — page will refresh in ~60 seconds.');
+      setTimeout(() => {
+        setRunningAll(false);
+        load();
+        onAccountsChange?.();
+      }, 60000);
+    } catch (e) {
+      if (e.response?.status === 409) {
+        toast.warn('Pacing already in progress — check back in about a minute.');
+      } else {
+        toast.error(e.response?.data?.error || 'Run all pacing failed');
+      }
+      setRunningAll(false);
+    }
   };
 
   const setCap = async (accountId, value) => {
