@@ -292,6 +292,10 @@ def run_pacing(account_id):
             seg_spend_map[_label] += _cspend
             seg_count_map[_label] += 1   # count unique campaigns, not DB rows
             _counted_gids.add(_c.google_campaign_id)
+            logger.info(
+                "Run pacing spend item: account_id=%s gid=%s name=%r label=%r spend=%.2f",
+                account.id, _c.google_campaign_id, _c.campaign_name, _label, _cspend,
+            )
 
         seg_daily_map[_label]  += _cdaily
         # Use max so an inactive campaign with monthly_budget=0 never overwrites
@@ -299,6 +303,13 @@ def run_pacing(account_id):
         if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
             seg_budget_map[_label] = _c.monthly_budget
 
+    logger.info(
+        "Run pacing seg totals: account_id=%s seg_spend=%s seg_count=%s seg_budget=%s",
+        account.id,
+        dict(seg_spend_map),
+        dict(seg_count_map),
+        seg_budget_map,
+    )
     # --- Per-campaign loop ---------------------------------------------------
     recommendations = []
     month_start, month_end = _month_bounds(today)
