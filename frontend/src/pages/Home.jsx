@@ -92,6 +92,61 @@ function getSegments(account) {
   return Object.values(map);
 }
 
+// Compute yesterday's account-level pace from prev_pacing data across campaigns.
+// Returns {deltaPct, prevDaysIn} or null when no prev data exists.
+function accountPrevPacing(account, daysIn, daysInMonth) {
+  const campaigns = uniqueCampaigns(account.campaigns || []);
+  const hasPrev   = campaigns.some(c => c.prev_pacing);
+  if (!hasPrev) return null;
+
+  const prevDaysIn = Math.max(daysIn - 1, 1);
+  const seenGids   = new Set();
+  let prevSpend = 0;
+  for (const c of campaigns) {
+    if (!c.prev_pacing) continue;
+    const key = campaignKey(c);
+    if (seenGids.has(key)) continue;
+    seenGids.add(key);
+    prevSpend += c.prev_pacing.actual_spend || 0;
+  }
+  if (prevSpend <= 0) return null;
+
+  const segBudgets = {};
+  for (const c of campaigns) {
+    const label = c.budget_label || 'Primary';
+    segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
+  }
+  const monthly = typeof account.total_monthly_budget === 'number'
+    ? account.total_monthly_budget
+    : Object.values(segBudgets).reduce((s, b) => s + b, 0);
+
+  if (monthly <= 0) return null;
+  const prevPace = computePace(monthly, prevSpend, prevDaysIn, daysInMonth);
+  return { deltaPct: prevPace.deltaPct, prevDaysIn };
+}
+
+// Returns 'improving' | 'worsening' | 'stable' | null
+function trendDirection(todayDelta, prevDelta) {
+  if (prevDelta == null) return null;
+  const diff = Math.abs(todayDelta) - Math.abs(prevDelta);
+  if (diff < -0.5) return 'improving';
+  if (diff >  0.5) return 'worsening';
+  return 'stable';
+}
+
+function TrendBadge({ todayDelta, prevPace }) {
+  if (!prevPace) return null;
+  const dir = trendDirection(todayDelta, prevPace.deltaPct);
+  if (!dir) return null;
+  const icon  = dir === 'improving' ? '↑' : dir === 'worsening' ? '↓' : '→';
+  const label = dir === 'improving' ? 'Improving' : dir === 'worsening' ? 'Worsening' : 'Stable';
+  return (
+    <span className={`trend-badge ${dir}`}>
+      {icon} {label} · was {fmtPct(prevPace.deltaPct)}
+    </span>
+  );
+}
+
 function accountPacing(account, daysIn, daysInMonth) {
   const campaigns = account.campaigns || [];
   const segBudgets = {};
@@ -223,6 +278,7 @@ function ApplyModal({ item, onClose, onConfirm }) {
 // ── Account Card ─────────────────────────────────────────────────────────
 function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply, navigate }) {
   const { monthly, spend, pace, segments } = accountPacing(account, daysIn, daysInMonth);
+  const prevPace    = accountPrevPacing(account, daysIn, daysInMonth);
   const isSegmented = segments.length > 1;
 
   const handleCTA = (e) => {
@@ -243,7 +299,10 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
             <div className="card-name" title={account.account_name}>{account.account_name}</div>
             <div className="card-meta">{isSegmented ? `${segments.length} segments` : 'single budget'}</div>
           </div>
-          <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
+            <TrendBadge todayDelta={pace.deltaPct} prevPace={prevPace} />
+          </div>
         </div>
 
         <PaceBar spend={spend} monthly={monthly} daysIn={daysIn} daysInMonth={daysInMonth} status={pace.status} />

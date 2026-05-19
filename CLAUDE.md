@@ -176,6 +176,16 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-19 — Yesterday trend badge on pace %
+**What:** Added a "↑ Improving · was X%" / "↓ Worsening · was X%" trend indicator wherever pace % is shown — on Home page account cards and the AccountDashboard header + Pace stat.
+**Why:** Knowing the current pace % in isolation doesn't tell you if things are getting better or worse. The trend badge shows direction by comparing today's % DIFF against yesterday's.
+**How it works:** Backend `Campaign.to_dict()` now includes `prev_pacing` — the most recent pacing row on a prior date. Frontend uses `prev_pacing.actual_spend` aggregated across deduped campaigns to recompute yesterday's `deltaPct` (same `computePace()` formula, with `daysIn - 1`). "Improving" = today's |deltaPct| is >0.5pp smaller than yesterday's; "Worsening" = >0.5pp larger; "Stable" = within that threshold.
+**Changes:**
+- `backend/database.py`: `Campaign.to_dict()` includes `prev_pacing` (previous distinct-date pacing row).
+- `frontend/src/pages/Home.jsx`: Added `accountPrevPacing()`, `trendDirection()`, `TrendBadge` component. `AccountCard` renders `TrendBadge` below the pace pill.
+- `frontend/src/pages/AccountDashboard.jsx`: Added `trendDirection()`, `TrendBadge`. `prevDeltaPct` computed from campaigns' `prev_pacing`. Trend shown in page header (inline) and Pace stat grid cell.
+- `frontend/src/index.css`: Added `.trend-badge` + `.improving` / `.worsening` / `.stable` styles.
+
 ### 2026-05-19 — Exclude zombie campaigns (ended before this month, $0 spend)
 **What:** Campaigns that ended in a prior month and have no MTD spend this month are now excluded from both dashboard views and pacing runs.
 **Why:** Google Ads frequently leaves campaigns ENABLED years after their end_date passes. Relying on `is_active` alone wasn't sufficient because campaigns synced before the liveness-check fix still had `is_active=True`. These zombies inflated segment counts, distorted budget ratios, and cluttered the dashboard.

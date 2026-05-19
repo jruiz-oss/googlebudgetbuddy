@@ -386,6 +386,16 @@ class Campaign(db.Model):
         )
         latest = campaign_rows[-1].to_dict() if campaign_rows else None
 
+        # Find the most recent pacing row on a *different* (earlier) date so the
+        # frontend can compute "yesterday's" pace % for the trend indicator.
+        prev = None
+        if latest and len(campaign_rows) >= 2:
+            latest_date = campaign_rows[-1].date
+            for row in reversed(campaign_rows[:-1]):
+                if row.date != latest_date:
+                    prev = row.to_dict()
+                    break
+
         return {
             'id': self.id,
             'account_id': self.account_id,
@@ -404,6 +414,7 @@ class Campaign(db.Model):
             'campaign_filter': self.campaign_filter,
             'created_at': self.created_at.isoformat(),
             'latest_pacing': latest,
+            'prev_pacing': prev,
         }
 
 

@@ -61,6 +61,29 @@ function allocateByCurrentShare(campaigns, totalDaily) {
   }));
 }
 
+// Returns 'improving' | 'worsening' | 'stable' | null
+function trendDirection(todayDelta, prevDelta) {
+  if (prevDelta == null) return null;
+  const diff = Math.abs(todayDelta) - Math.abs(prevDelta);
+  if (diff < -0.5) return 'improving';
+  if (diff >  0.5) return 'worsening';
+  return 'stable';
+}
+
+function TrendBadge({ todayDelta, prevDeltaPct, inline = false }) {
+  if (prevDeltaPct == null) return null;
+  const dir = trendDirection(todayDelta, prevDeltaPct);
+  if (!dir) return null;
+  const icon  = dir === 'improving' ? '↑' : dir === 'worsening' ? '↓' : '→';
+  const label = dir === 'improving' ? 'Improving' : dir === 'worsening' ? 'Worsening' : 'Stable';
+  const wasStr = (prevDeltaPct > 0 ? '+' : '') + prevDeltaPct.toFixed(1) + '%';
+  return (
+    <span className={`trend-badge ${dir}`} style={inline ? { marginLeft: 6 } : {}}>
+      {icon} {label} · was {wasStr}
+    </span>
+  );
+}
+
 function getSegments(account, campaigns) {
   if (Array.isArray(account?.segment_summaries) && account.segment_summaries.length) {
     return account.segment_summaries.map(s => ({
@@ -534,6 +557,23 @@ export default function AccountDashboard({ onPacingComplete }) {
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
   const currentDailyTotal = uniqueCampaigns(campaigns).reduce((s, c) => s + currentDaily(c), 0);
 
+  // Yesterday's pace % — computed from prev_pacing rows so we can show a trend.
+  const prevDaysIn = Math.max(daysIn - 1, 1);
+  const _prevSeenGids = new Set();
+  let prevSpend = 0;
+  let hasPrevData = false;
+  for (const c of uniqueCampaigns(campaigns)) {
+    if (!c.prev_pacing) continue;
+    hasPrevData = true;
+    const key = campaignKey(c);
+    if (_prevSeenGids.has(key)) continue;
+    _prevSeenGids.add(key);
+    prevSpend += c.prev_pacing.actual_spend || 0;
+  }
+  const prevDeltaPct = (hasPrevData && prevSpend > 0 && monthly > 0)
+    ? computePace(monthly, prevSpend, prevDaysIn, daysInMonth).deltaPct
+    : null;
+
   // Always compute recommended daily fresh from the current budget and spend.
   // Relying on recFromBackend (stored DB value) causes stale recommendations to
   // persist across runs — if a previous run stored a wrong value (e.g. from a
@@ -566,6 +606,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             day {daysIn} of {daysInMonth}
             <span style={{ color: 'var(--line-2)' }}>·</span>
             <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
+            <TrendBadge todayDelta={pace.deltaPct} prevDeltaPct={prevDeltaPct} inline />
           </div>
         </div>
         <div className="dactions">
@@ -585,7 +626,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
         <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(currentDailyTotal)}</div><div className="ssub">live Google Ads budgets</div></div>
         <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
-        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">vs ideal pace (% DIFF)</div></div>
+        <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">vs ideal pace (% DIFF)</div>{prevDeltaPct != null && <TrendBadge todayDelta={pace.deltaPct} prevDeltaPct={prevDeltaPct} />}</div>
       </div>
 
       {/* Two-column */}

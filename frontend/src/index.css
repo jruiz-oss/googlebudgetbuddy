@@ -366,6 +366,20 @@ html, body {
 .pill.ok    { background: var(--green-bg); color: var(--green); border-color: var(--green-line); }
 .pill.neutral { background: var(--bg-2); color: var(--ink-3); border-color: var(--line); }
 
+/* ── Trend badge (yesterday comparison) ─────────────────────────────── */
+.trend-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.trend-badge.improving { color: var(--green); }
+.trend-badge.worsening { color: var(--red); }
+.trend-badge.stable    { color: var(--muted); }
+
 /* ── Status dot ─────────────────────────────────────────────────────── */
 
 .dot {
