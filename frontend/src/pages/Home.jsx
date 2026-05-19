@@ -281,6 +281,12 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
   const prevPace    = accountPrevPacing(account, daysIn, daysInMonth);
   const isSegmented = segments.length > 1;
 
+  // Current daily budget total (Google Ads budget setting, not average spend rate).
+  // Used to hide the Apply button once rec ≈ current (i.e. budget was just applied).
+  const APPLY_THRESHOLD = 1.0;
+  const currentDailyBudget = uniqueCampaigns(account.campaigns || []).reduce((s, c) => s + currentDaily(c), 0);
+  const needsApply = !isSegmented && Math.abs(pace.dailyRec - currentDailyBudget) > APPLY_THRESHOLD;
+
   const handleCTA = (e) => {
     e.stopPropagation();
     if (isSegmented) {
@@ -316,10 +322,17 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
           <span className="sv rec">{fmt(pace.dailyRec)}</span>
         </div>
 
-        <button className={`card-cta ${isSegmented ? 'outline' : 'primary'}`} onClick={handleCTA}>
+        <button
+          className={`card-cta ${isSegmented ? 'outline' : needsApply ? 'primary' : 'ghost'}`}
+          onClick={isSegmented || needsApply ? handleCTA : e => e.stopPropagation()}
+          disabled={!isSegmented && !needsApply}
+          style={!isSegmented && !needsApply ? { opacity: 0.55, cursor: 'default' } : undefined}
+        >
           {isSegmented
             ? <><span>review {segments.length} segments</span><ChevronRight size={13} /></>
-            : <span>set daily to {fmt(pace.dailyRec)}</span>}
+            : needsApply
+              ? <span>set daily to {fmt(pace.dailyRec)}</span>
+              : <span>✓ budget applied</span>}
         </button>
       </div>
 
@@ -654,6 +667,29 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     try {
       const r = await axios.post(`/api/pacing/${item.accountId}/apply`, { adjustments });
       toast.success(r.data.message || 'Daily budgets updated in Google Ads');
+      // Optimistically update local campaigns state so the Apply button hides
+      // immediately (before load() resolves) and currentDailyBudget reflects the
+      // new values right away.
+      const byId = new Map(adjustments.map(a => [a.campaign_id, a.new_daily_budget]));
+      setAccounts(prev => prev.map(a => {
+        if (a.id !== item.accountId) return a;
+        const updatedCampaigns = (a.campaigns || []).map(c => {
+          const newBudget = byId.get(c.id);
+          if (newBudget == null) return c;
+          return {
+            ...c,
+            current_daily_budget: newBudget,
+            latest_pacing: c.latest_pacing ? {
+              ...c.latest_pacing,
+              current_daily_budget: newBudget,
+              recommended_daily_budget: newBudget,
+              status: 'ON_PACE',
+              change_percent: 0,
+            } : c.latest_pacing,
+          };
+        });
+        return { ...a, campaigns: updatedCampaigns };
+      }));
       load();
       onAccountsChange?.();
     } catch (e) {

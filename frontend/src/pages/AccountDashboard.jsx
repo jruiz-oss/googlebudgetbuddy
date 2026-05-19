@@ -440,6 +440,27 @@ export default function AccountDashboard({ onPacingComplete }) {
     finally { setSettingUp(false); setSetupStatus(''); }
   };
 
+  // Optimistically update local campaign state after a successful apply so
+  // currentDailyTotal reflects the new budgets immediately (before load() resolves).
+  const applyOptimisticUpdate = (adjustments) => {
+    const byId = new Map(adjustments.map(a => [a.campaign_id, a.new_daily_budget]));
+    setCampaigns(prev => prev.map(c => {
+      const newBudget = byId.get(c.id);
+      if (newBudget == null) return c;
+      return {
+        ...c,
+        current_daily_budget: newBudget,
+        latest_pacing: c.latest_pacing ? {
+          ...c.latest_pacing,
+          current_daily_budget: newBudget,
+          recommended_daily_budget: newBudget,
+          status: 'ON_PACE',
+          change_percent: 0,
+        } : c.latest_pacing,
+      };
+    }));
+  };
+
   const handleConfirmApply = async (item) => {
     setApplyItem(null);
     setApplying(true);
@@ -464,6 +485,7 @@ export default function AccountDashboard({ onPacingComplete }) {
           return;
         }
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
+        applyOptimisticUpdate(adjustments);
         toast.success(r.data.message);
       } else {
         // Single-budget or per-segment apply.
@@ -497,6 +519,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         }));
 
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
+        applyOptimisticUpdate(adjustments);
         toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
       }
       load();
@@ -581,6 +604,17 @@ export default function AccountDashboard({ onPacingComplete }) {
   // correct live formula.  The formula is: max(0, monthly - spend) / daysInMonth,
   // which is identical to what the Google Sheet uses.
   const displayRec = pace.dailyRec;
+  // Only show the Apply button when recommended meaningfully differs from current
+  // (> $1). After applying, currentDailyTotal updates to match displayRec and the
+  // button hides automatically, confirming the apply worked.
+  const APPLY_THRESHOLD = 1.0;
+  const segNeedsApply = (s) => {
+    const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
+    return Math.abs(sp.dailyRec - s.currentDaily) > APPLY_THRESHOLD;
+  };
+  const needsApply = isSegmented
+    ? segments.some(segNeedsApply)
+    : Math.abs(displayRec - currentDailyTotal) > APPLY_THRESHOLD;
   const hasSheetId = Boolean(account.settings?.google_sheet_id);
   const lastSyncStr = lastSync ? (() => { const mins = Math.round((Date.now() - lastSync) / 60000); return mins < 1 ? 'just now' : `${mins}m ago`; })() : 'not yet this session';
 
@@ -615,8 +649,12 @@ export default function AccountDashboard({ onPacingComplete }) {
           <button className="btn small" onClick={() => navigate(`/accounts/${id}/leads`)}><Download size={13} /> Leads</button>
           <button className="btn small" onClick={runPacing} disabled={running}><Play size={13} /> {running ? 'Running…' : 'Run Pacing'}</button>
           {isSegmented
-            ? <button className="btn primary" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>{applying ? 'Applying…' : 'Apply all recommended'}</button>
-            : <button className="btn primary" onClick={() => setApplyItem({ name: account.account_name, monthly, spend, rec: displayRec })}>Set daily to {fmt(displayRec)}</button>}
+            ? needsApply
+              ? <button className="btn primary" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>{applying ? 'Applying…' : 'Apply all recommended'}</button>
+              : <button className="btn ghost" disabled style={{ opacity: 0.5 }}>✓ Budgets applied</button>
+            : needsApply
+              ? <button className="btn primary" onClick={() => setApplyItem({ name: account.account_name, monthly, spend, rec: displayRec })}>Set daily to {fmt(displayRec)}</button>
+              : <button className="btn ghost" disabled style={{ opacity: 0.5 }}>✓ Budgets applied</button>}
         </div>
       </div>
 
@@ -653,7 +691,10 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div className="panel" style={{ padding: 0 }}>
           <div className="panel-head" style={{ padding: '14px 16px 0' }}>
             <div><h3>Segments</h3><div className="ph-desc">{isSegmented ? `${segments.length} segments · click Apply to push recommended daily` : 'Single-budget account'}</div></div>
-            {isSegmented && <button className="btn ghost small" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })}>Apply all</button>}
+            {isSegmented && (needsApply
+              ? <button className="btn ghost small" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })}>Apply all</button>
+              : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓ All applied</span>
+            )}
           </div>
 
           {campaigns.length === 0 ? (
@@ -679,6 +720,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                 <tbody>
                   {segments.map(s => {
                     const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
+                    const segApplyNeeded = segNeedsApply(s);
                     return (
                       <tr key={s.name}>
                         <td style={{ paddingLeft: 16 }}>
@@ -693,7 +735,10 @@ export default function AccountDashboard({ onPacingComplete }) {
                         <td>{fmt(s.currentDaily)}</td>
                         <td className="seg-rec">{fmt(sp.dailyRec)}</td>
                         <td style={{ paddingRight: 16, textAlign: 'right' }}>
-                          <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, segmentOf: account.account_name })}>Apply</button>
+                          {segApplyNeeded
+                            ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, segmentOf: account.account_name })}>Apply</button>
+                            : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓</span>
+                          }
                         </td>
                       </tr>
                     );
