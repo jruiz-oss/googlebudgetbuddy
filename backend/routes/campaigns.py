@@ -7,7 +7,7 @@ import logging
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
 
-from database import Account, Campaign, GoogleOAuthToken, PacingData, db
+from database import Account, Campaign, GoogleOAuthToken, PacingData, db, visible_latest_campaigns
 from routes.auth import login_required
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def get_campaigns(account_id):
         .order_by(Campaign.campaign_name)
         .all()
     )
-    visible = [c for c in all_campaigns if c.is_visible()]
+    visible = visible_latest_campaigns(all_campaigns)
     return jsonify({'campaigns': [c.to_dict() for c in visible]})
 
 

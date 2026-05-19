@@ -326,7 +326,7 @@ export default function AccountDashboard({ onPacingComplete }) {
     setCampaigns(prev => prev.map(c => {
       const rec = byId.get(c.id);
       if (!rec) return c;
-      return { ...c, monthly_budget: rec.monthly_budget ?? c.monthly_budget, latest_pacing: { ...(c.latest_pacing || {}), actual_spend: rec.actual_spend, pace_ratio: rec.pace_ratio, current_daily_budget: rec.current_daily_budget, recommended_daily_budget: rec.recommended_daily_budget, change_percent: rec.change_percent, status: rec.status } };
+      return { ...c, monthly_budget: rec.monthly_budget ?? c.monthly_budget, latest_pacing: { ...(c.latest_pacing || {}), date: rec.date, actual_spend: rec.actual_spend, pace_ratio: rec.pace_ratio, current_daily_budget: rec.current_daily_budget, recommended_daily_budget: rec.recommended_daily_budget, change_percent: rec.change_percent, status: rec.status } };
     }));
   };
 

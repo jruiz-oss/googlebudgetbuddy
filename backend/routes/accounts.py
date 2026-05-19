@@ -11,7 +11,7 @@ import threading
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
 
-from database import Account, AccountSettings, Campaign, GoogleOAuthToken, db
+from database import Account, AccountSettings, Campaign, GoogleOAuthToken, db, canonical_campaigns
 from google_ads_client import (
     GoogleAdsError, list_mcc_child_accounts, list_campaigns,
     _fetch_customer_name, _fmt_customer_id, get_access_token,
@@ -60,6 +60,40 @@ def _ensure_settings(account):
         db.session.add(s)
         db.session.commit()
     return account.settings
+
+
+def _upsert_campaign_from_live(account_id, live_campaign):
+    """Create/update one canonical campaign row and sideline old duplicates."""
+    cid = str(live_campaign['campaign_id'])
+    is_live = _is_campaign_live(live_campaign)
+    existing_rows = Campaign.query.filter_by(
+        account_id=account_id,
+        google_campaign_id=cid,
+    ).all()
+
+    if existing_rows:
+        campaign = canonical_campaigns(existing_rows)[0]
+        campaign.campaign_name = live_campaign['campaign_name']
+        campaign.budget_resource_name = live_campaign.get('budget_resource_name')
+        campaign.is_active = is_live
+
+        # Keep duplicate rows for historical integrity, but make sure they can no
+        # longer look like independently active campaigns in live calculations.
+        for duplicate in existing_rows:
+            if duplicate.id != campaign.id:
+                duplicate.is_active = False
+        return campaign, False
+
+    campaign = Campaign(
+        account_id=account_id,
+        campaign_name=live_campaign['campaign_name'],
+        google_campaign_id=cid,
+        monthly_budget=0.0,
+        budget_resource_name=live_campaign.get('budget_resource_name'),
+        is_active=is_live,
+    )
+    db.session.add(campaign)
+    return campaign, True
 
 
 # ---------------------------------------------------------------------------
@@ -186,24 +220,11 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
 
     added = updated = 0
     for lc in live:
-        cid = str(lc['campaign_id'])
-        is_live = _is_campaign_live(lc)
-        existing = Campaign.query.filter_by(account_id=account.id, google_campaign_id=cid).first()
-        if existing:
-            existing.campaign_name = lc['campaign_name']
-            existing.budget_resource_name = lc.get('budget_resource_name')
-            existing.is_active = is_live
-            updated += 1
-        else:
-            db.session.add(Campaign(
-                account_id=account.id,
-                campaign_name=lc['campaign_name'],
-                google_campaign_id=cid,
-                monthly_budget=0.0,
-                budget_resource_name=lc.get('budget_resource_name'),
-                is_active=is_live,
-            ))
+        _, created = _upsert_campaign_from_live(account.id, lc)
+        if created:
             added += 1
+        else:
+            updated += 1
     return added, updated
 
 
@@ -301,24 +322,11 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
                     db.session.flush()
 
                     for lc in live:
-                        cid = str(lc['campaign_id'])
-                        is_live = _is_campaign_live(lc)
-                        existing = Campaign.query.filter_by(account_id=acct_id, google_campaign_id=cid).first()
-                        if existing:
-                            existing.campaign_name = lc['campaign_name']
-                            existing.budget_resource_name = lc.get('budget_resource_name')
-                            existing.is_active = is_live
-                            campaigns_updated += 1
-                        else:
-                            db.session.add(Campaign(
-                                account_id=acct_id,
-                                campaign_name=lc['campaign_name'],
-                                google_campaign_id=cid,
-                                monthly_budget=0.0,
-                                budget_resource_name=lc.get('budget_resource_name'),
-                                is_active=is_live,
-                            ))
+                        _, created = _upsert_campaign_from_live(acct_id, lc)
+                        if created:
                             campaigns_added += 1
+                        else:
+                            campaigns_updated += 1
 
             logger.info(
                 'MCC sync campaigns: %d added, %d updated across %d accounts',
@@ -596,26 +604,11 @@ def import_campaigns(account_id):
             skipped += 1
             continue
         lc = live_by_id[cid]
-        existing = Campaign.query.filter_by(
-            account_id=account_id,
-            google_campaign_id=cid,
-        ).first()
-        if existing:
-            # Update budget resource name in case it changed
-            existing.budget_resource_name = lc.get('budget_resource_name')
-            existing.is_active = _is_campaign_live(lc)
-            skipped += 1
-        else:
-            c = Campaign(
-                account_id=account_id,
-                campaign_name=lc['campaign_name'],
-                google_campaign_id=cid,
-                monthly_budget=0.0,  # Will be set by sheet sync
-                budget_resource_name=lc.get('budget_resource_name'),
-                is_active=_is_campaign_live(lc),
-            )
-            db.session.add(c)
+        _, created = _upsert_campaign_from_live(account_id, lc)
+        if created:
             added += 1
+        else:
+            skipped += 1
 
     db.session.commit()
     return jsonify({

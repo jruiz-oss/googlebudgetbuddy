@@ -31,6 +31,7 @@ from sqlalchemy.orm import selectinload
 from database import (
     Account, AccountSettings, BudgetAdjustment, Campaign,
     GoogleOAuthToken, PacingData, PacingRun, PauseEvent, db,
+    canonical_campaigns, visible_latest_campaigns,
 )
 from google_ads_client import (
     GoogleAdsError, get_campaign_mtd_spend, get_campaign_daily_spend,
@@ -103,6 +104,53 @@ def _campaign_is_active_today(campaign, today):
 def _effective_mcc_customer_id(account):
     """Use the account-specific MCC when present, otherwise fall back to env."""
     return (account.mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '').strip() or None
+
+
+def _current_daily_from_history(campaign, today):
+    """Use the latest pre-run daily budget snapshot, ignoring rows being replaced today."""
+    rows = sorted(
+        (
+            p for p in (campaign.pacing_data or [])
+            if p.date is not None and p.date < today
+        ),
+        key=lambda r: (r.date, r.id or 0),
+    )
+    latest = rows[-1] if rows else None
+    return latest.current_daily_budget if latest and latest.current_daily_budget else 0.0
+
+
+def _delete_today_pacing_data(campaigns, today):
+    """Remove same-day snapshots before writing the fresh API-backed run."""
+    campaign_ids = [c.id for c in campaigns if c.id]
+    if not campaign_ids:
+        return 0
+    deleted = (
+        PacingData.query
+        .filter(PacingData.campaign_id.in_(campaign_ids), PacingData.date == today)
+        .delete(synchronize_session=False)
+    )
+    db.session.flush()
+    return deleted
+
+
+def _campaigns_for_pacing(account, today, metrics_by_id):
+    """Return canonical live/spending campaigns plus live/inactive counts for logs."""
+    campaigns = canonical_campaigns(account.campaigns)
+    live_campaigns = [
+        c for c in campaigns
+        if c.is_active and _campaign_is_active_today(c, today)
+    ]
+    inactive_campaigns = [c for c in campaigns if not c.is_active]
+
+    live_spending = [
+        c for c in live_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    spending_inactive = [
+        c for c in inactive_campaigns
+        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
+    ]
+    return campaigns, live_campaigns, inactive_campaigns, live_spending + spending_inactive
 
 
 # ---------------------------------------------------------------------------
@@ -180,11 +228,12 @@ def run_pacing(account_id):
     #    Live  = is_active True (ENABLED + not expired, set during sync).
     #    Inactive = paused, expired-ENABLED, or REMOVED — stored in DB but
     #               only included in pacing if they have MTD spend > 0.
-    live_campaigns = [c for c in account.campaigns if c.is_active and _campaign_is_active_today(c, today)]
-    inactive_campaigns = [c for c in account.campaigns if not c.is_active]
+    db_campaigns = canonical_campaigns(account.campaigns)
+    live_campaigns = [c for c in db_campaigns if c.is_active and _campaign_is_active_today(c, today)]
+    inactive_campaigns = [c for c in db_campaigns if not c.is_active]
 
     # Bail early only if there are truly no campaigns at all
-    if not account.campaigns:
+    if not db_campaigns:
         return jsonify({
             'recommendations': [],
             'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
@@ -199,7 +248,7 @@ def run_pacing(account_id):
     # 3. Fetch MTD spend for ALL campaigns (live + inactive).
     #    Inactive campaigns with spend > 0 this month are included in pacing.
     #    Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
-    all_campaign_ids = [c.google_campaign_id for c in account.campaigns]
+    all_campaign_ids = [c.google_campaign_id for c in db_campaigns]
     logger.info(
         "Run pacing spend fetch: account_id=%s live=%d inactive=%d customer_id=%r mcc_id=%r",
         account.id,
@@ -232,23 +281,14 @@ def run_pacing(account_id):
             )
         }), 502
 
-    # Only pace live campaigns that actually spent money this month.
-    # Many Google Ads accounts have years of old ENABLED campaigns that have
-    # never been deleted — they're is_active=True but have $0 MTD spend.
-    # Including them inflates seg_count and splits recommendations across
-    # phantom campaigns.  Mirrors the dashboard's is_visible() logic.
-    live_campaigns = [
-        c for c in live_campaigns
-        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
-    ]
-    # Also include inactive (paused/expired) campaigns that did spend this month
-    spending_inactive = [
-        c for c in inactive_campaigns
-        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
-    ]
-    active_campaigns = live_campaigns + spending_inactive
+    # Only pace canonical campaigns that actually spent money this month.
+    # Inactive campaigns with MTD spend still count toward the Google Ads total.
+    _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
+        account, today, metrics_by_id
+    )
 
     if not active_campaigns:
+        _delete_today_pacing_data(db_campaigns, today)
         return jsonify({
             'recommendations': [],
             'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
@@ -265,6 +305,14 @@ def run_pacing(account_id):
     # campaigns (matching how Google Ads typically distributes a segment budget).
     from collections import defaultdict
 
+    deleted_today = _delete_today_pacing_data(db_campaigns, today)
+    if deleted_today:
+        logger.info(
+            "Run pacing replaced same-day snapshots: account_id=%s deleted=%d",
+            account.id,
+            deleted_today,
+        )
+
     # --- Build segment aggregates (spend, current daily, count) --------------
     seg_spend_map   = defaultdict(float)   # label → total MTD spend
     seg_daily_map   = defaultdict(float)   # label → sum of current daily budgets
@@ -279,11 +327,7 @@ def run_pacing(account_id):
 
     for _c in active_campaigns:
         _label = _c.budget_label or 'Primary'
-        _latest = sorted(
-            _c.pacing_data,
-            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
-        )
-        _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
+        _cdaily = _current_daily_from_history(_c, today)
 
         # Only add spend/count once per unique Google campaign ID to avoid
         # double-counting when duplicate DB rows share the same campaign ID.
@@ -326,11 +370,7 @@ def run_pacing(account_id):
         cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
 
         # Current daily for this individual campaign
-        latest_rows = sorted(
-            campaign.pacing_data,
-            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
-        )
-        current_daily = latest_rows[-1].current_daily_budget if latest_rows and latest_rows[-1].current_daily_budget else 0.0
+        current_daily = _current_daily_from_history(campaign, today)
 
         # --- Segment-level computation ----------------------------------------
         seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
@@ -371,6 +411,7 @@ def run_pacing(account_id):
         recommendations.append({
             'campaign_id': campaign.id,
             'campaign_name': campaign.campaign_name,
+            'date': today.isoformat(),
             'google_campaign_id': campaign.google_campaign_id,
             'budget_resource_name': campaign.budget_resource_name,
             'budget_label': label,
@@ -397,7 +438,10 @@ def run_pacing(account_id):
     if settings.google_sheet_id:
         try:
             from routes.sheets import write_sheet_spend_for_account
-            sheet_write = write_sheet_spend_for_account(account_id)
+            sheet_write = write_sheet_spend_for_account(
+                account_id,
+                segment_spend_by_label=dict(seg_spend_map),
+            )
             logger.info(
                 "Run pacing sheet write result: account_id=%s written=%s skipped=%s",
                 account.id,
@@ -419,8 +463,8 @@ def run_pacing(account_id):
     # Grant accounts are exempt from auto-pause (they can safely exceed caps).
     auto_pause_triggered = None
     if settings.auto_pause_enabled and active_campaigns and not is_grant_account:
-        total_budget = sum(c.monthly_budget for c in active_campaigns)
-        total_spend = sum(r['actual_spend'] for r in recommendations)
+        total_budget = sum(seg_budget_map.values())
+        total_spend = sum(seg_spend_map.values())
         if total_budget > 0:
             spend_pct = (total_spend / total_budget) * 100
             if spend_pct >= settings.auto_pause_threshold:
@@ -564,7 +608,7 @@ def pacing_summary(account_id):
         .get_or_404(account_id)
     )
 
-    active_campaigns = [c for c in account.campaigns if c.is_active]
+    active_campaigns = visible_latest_campaigns(account.campaigns)
     today = datetime.utcnow().date()
     last_run = (
         PacingRun.query
@@ -748,18 +792,19 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
 
     is_grant_account = 'grant' in account.account_name.lower()
 
+    db_campaigns = canonical_campaigns(account.campaigns)
     live_campaigns = [
-        c for c in account.campaigns
+        c for c in db_campaigns
         if c.is_active and _campaign_is_active_today(c, today)
     ]
-    inactive_campaigns = [c for c in account.campaigns if not c.is_active]
+    inactive_campaigns = [c for c in db_campaigns if not c.is_active]
 
-    if not account.campaigns:
+    if not db_campaigns:
         logger.info('run_pacing_for_account: account %s has no campaigns — skipping', account.id)
         return
 
     # Fetch spend for ALL campaigns so inactive ones with MTD spend get included
-    all_campaign_ids = [c.google_campaign_id for c in account.campaigns]
+    all_campaign_ids = [c.google_campaign_id for c in db_campaigns]
     try:
         metrics_by_id = get_campaign_mtd_spend(
             refresh_token_str,
@@ -786,19 +831,14 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         db.session.commit()
         return
 
-    # Only pace live campaigns that actually spent money this month (mirrors run_pacing route).
-    live_campaigns = [
-        c for c in live_campaigns
-        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
-    ]
-    # Also include inactive (paused/expired) campaigns that did spend this month
-    spending_inactive = [
-        c for c in inactive_campaigns
-        if metrics_by_id.get(c.google_campaign_id, {}).get('spend', 0) > 0
-    ]
-    active_campaigns = live_campaigns + spending_inactive
+    # Only pace canonical campaigns that actually spent money this month
+    # (mirrors the manual run route).
+    _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
+        account, today, metrics_by_id
+    )
 
     if not active_campaigns:
+        _delete_today_pacing_data(db_campaigns, today)
         logger.info('run_pacing_for_account: account %s has no campaigns to pace — skipping', account.id)
         return
 
@@ -811,16 +851,20 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
     seg_count_map  = defaultdict(int)
     seg_budget_map = {}
 
+    deleted_today = _delete_today_pacing_data(db_campaigns, today)
+    if deleted_today:
+        logger.info(
+            'run_pacing_for_account replaced same-day snapshots: account_id=%s deleted=%d',
+            account.id,
+            deleted_today,
+        )
+
     # Deduplicate spend by google_campaign_id (same fix as in run_pacing route).
     _counted_gids = set()
 
     for _c in active_campaigns:
         _label = _c.budget_label or 'Primary'
-        _latest = sorted(
-            _c.pacing_data,
-            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
-        )
-        _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
+        _cdaily = _current_daily_from_history(_c, today)
 
         if _c.google_campaign_id not in _counted_gids:
             _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
@@ -843,15 +887,7 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         conversions = campaign_metrics.get('conversions', None)
         cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
 
-        latest_rows = sorted(
-            campaign.pacing_data,
-            key=lambda r: (r.date or datetime.min.date(), r.id or 0),
-        )
-        current_daily = (
-            latest_rows[-1].current_daily_budget
-            if latest_rows and latest_rows[-1].current_daily_budget
-            else 0.0
-        )
+        current_daily = _current_daily_from_history(campaign, today)
 
         seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
         seg_spend  = seg_spend_map.get(label, actual_spend)
@@ -903,6 +939,14 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
     if settings and settings.google_sheet_id:
         try:
             from routes.sheets import write_sheet_spend_for_account
-            write_sheet_spend_for_account(account.id)
+            write_sheet_spend_for_account(
+                account.id,
+                segment_spend_by_label=dict(seg_spend_map),
+            )
         except Exception as e:
             logger.warning('Sheet write-back failed for account %s: %s', account.id, e)
+
+    return {
+        'processed': processed,
+        'segment_spend_by_label': {k: round(v, 2) for k, v in seg_spend_map.items()},
+    }

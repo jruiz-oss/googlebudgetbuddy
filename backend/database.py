@@ -1,8 +1,82 @@
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import date, datetime
 from sqlalchemy.types import String, TypeDecorator
 
 db = SQLAlchemy()
+
+
+def _campaign_latest_pacing(campaign, latest_date=None):
+    """Return the latest pacing row, optionally constrained to a specific date."""
+    rows = [
+        p for p in (campaign.pacing_data or [])
+        if p.date is not None and (latest_date is None or p.date == latest_date)
+    ]
+    if not rows:
+        return None
+    return sorted(rows, key=lambda r: (r.date, r.id or 0))[-1]
+
+
+def _campaign_latest_date(campaign):
+    latest = _campaign_latest_pacing(campaign)
+    return latest.date if latest else None
+
+
+def canonical_campaigns(campaigns):
+    """Return one campaign row per Google campaign ID.
+
+    Duplicate DB rows can exist from older imports. For live pacing/dashboard
+    math, one Google Ads campaign must contribute only once. Prefer rows that
+    look active/current, then fall back deterministically to the newest DB row.
+    """
+    grouped = {}
+    for campaign in campaigns or []:
+        key = campaign.google_campaign_id or f"db:{campaign.id or id(campaign)}"
+        grouped.setdefault(key, []).append(campaign)
+
+    canonical = []
+    for rows in grouped.values():
+        canonical.append(max(rows, key=lambda c: (
+            bool(c.is_active),
+            _campaign_latest_date(c) or date.min,
+            bool(c.budget_resource_name),
+            c.monthly_budget or 0,
+            c.created_at or datetime.min,
+            c.id or 0,
+        )))
+    return sorted(canonical, key=lambda c: ((c.campaign_name or '').lower(), c.id or 0))
+
+
+def latest_pacing_date(campaigns):
+    """Return the latest pacing date across campaign rows."""
+    latest = None
+    for campaign in campaigns or []:
+        row_date = _campaign_latest_date(campaign)
+        if row_date and (latest is None or row_date > latest):
+            latest = row_date
+    return latest
+
+
+def visible_latest_campaigns(campaigns):
+    """Campaigns visible to dashboards: latest run only, deduped by Google ID."""
+    canonical = canonical_campaigns(campaigns)
+    latest_date = latest_pacing_date(canonical)
+    if not latest_date:
+        return []
+    visible = []
+    for campaign in canonical:
+        latest = _campaign_latest_pacing(campaign, latest_date)
+        if latest and (latest.actual_spend or 0) > 0:
+            visible.append(campaign)
+    return visible
+
+
+def segment_budget_total(campaigns):
+    """Sum one monthly budget per segment, not once per campaign row."""
+    budgets = {}
+    for campaign in campaigns or []:
+        label = campaign.budget_label or 'Primary'
+        budgets[label] = max(budgets.get(label, 0), campaign.monthly_budget or 0)
+    return sum(budgets.values())
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +163,11 @@ class Account(db.Model):
                 'created_at': self.created_at.isoformat() if self.created_at else None,
             }
 
-        # Visible = currently live OR spent money this month. Dead campaigns
-        # (inactive + $0 this month) are hidden from the dashboard entirely.
-        visible_campaigns = [c for c in self.campaigns if c.is_visible()]
-        total_monthly_budget = sum((c.monthly_budget or 0) for c in visible_campaigns)
+        # Dashboard data must reflect only the latest pacing run and only one DB
+        # row per Google campaign ID. Older duplicate rows are retained for
+        # history but never participate in live totals.
+        visible_campaigns = visible_latest_campaigns(self.campaigns)
+        total_monthly_budget = segment_budget_total(visible_campaigns)
 
         on_track = over_pacing = under_pacing = 0
         for c in visible_campaigns:
@@ -149,6 +224,9 @@ class Campaign(db.Model):
                         Empty / null means this is the catch-all "Primary" segment.
     """
     __tablename__ = 'campaigns'
+    __table_args__ = (
+        db.UniqueConstraint('account_id', 'google_campaign_id', name='uq_campaign_account_google_id'),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False, index=True)

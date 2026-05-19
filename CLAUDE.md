@@ -158,6 +158,12 @@ ALTER TABLE campaigns ADD COLUMN campaign_filter VARCHAR(100);
 ALTER TABLE pacing_data ADD COLUMN clicks INTEGER;
 ALTER TABLE pacing_data ADD COLUMN conversions FLOAT;
 ALTER TABLE pacing_data ADD COLUMN cpc FLOAT;
+
+-- Future duplicate guard after cleaning existing duplicate rows
+-- 1) Pick one canonical row per (account_id, google_campaign_id)
+-- 2) Move any history you want to keep, or leave old rows inactive for reference
+-- 3) Add the uniqueness guard:
+ALTER TABLE campaigns ADD CONSTRAINT uq_campaign_account_google_id UNIQUE (account_id, google_campaign_id);
 ```
 
 On fresh deployments these are created automatically by `db.create_all()`.
@@ -165,6 +171,17 @@ On fresh deployments these are created automatically by `db.create_all()`.
 ---
 
 ## Change log
+
+### 2026-05-19 — Canonical MTD spend source of truth
+**What:** Made the current Google Ads API pull the source of truth for each pacing run and blocked stale/duplicate DB rows from re-entering MTD totals.
+**Why:** Logs for Goodwill AZ - Retail Grant showed the live API aggregate was correct (`$6,021.08`), but duplicate campaign rows and stale `PacingData` could still leak into dashboard totals or sheet writeback.
+**Changes:**
+- `backend/database.py`: Added canonical campaign helpers so dashboards and live calculations use one row per `google_campaign_id`, restricted to the latest pacing date. Fresh DBs now include a uniqueness guard on `(account_id, google_campaign_id)`.
+- `backend/routes/pacing.py`: Manual, scheduler, run-all, and MCC-triggered pacing now fetch spend for canonical campaigns only, replace same-day `PacingData` before writing fresh snapshots, and pass current-run segment totals directly to sheet writeback.
+- `backend/routes/sheets.py`: Google Ads budget sync/writeback now match canonical campaigns only. Manual writeback no longer falls back to older pacing rows; it requires today's pacing data unless pacing passes current-run totals.
+- `backend/routes/accounts.py`: Campaign import/MCC sync now update one canonical campaign row and mark older duplicates inactive instead of allowing more duplicate active rows.
+- `backend/routes/campaigns.py`, `AccountDashboard.jsx`, `Notifications.jsx`: Dashboard-facing reads use latest-run/deduped campaign data; immediate post-run UI merges now include the pacing date.
+- `backend/tests/test_spend_accuracy.py`: Added regression tests for duplicate campaign canonicalization, stale prior/same-day pacing rows, and current-run sheet writeback totals.
 
 ### 2026-05-19 — Fix 2x MTD spend and $0 recommended daily (duplicate DB rows)
 **What:** Fixed MTD spend showing exactly 2x the real number, and recommended daily showing $0, caused by duplicate `google_campaign_id` rows in the DB (43 rows for ~21 unique campaigns).

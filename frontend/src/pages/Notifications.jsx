@@ -14,12 +14,18 @@ function buildNotifications(accounts) {
     const segBudgets = {};
     for (const c of campaigns) {
       const label = c.budget_label || 'Primary';
-      segBudgets[label] = c.monthly_budget || 0;
+      segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
     }
     const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
-    // Deduplicate spend by google_campaign_id to avoid double-counting duplicate DB rows.
+    const mostRecentDate = campaigns.reduce((latest, c) => {
+      const d = c.latest_pacing?.date;
+      if (!d) return latest;
+      return !latest || d > latest ? d : latest;
+    }, null);
+    // Deduplicate spend by google_campaign_id and only use the latest pacing run.
     const _nSeenGids = new Set();
     const spend = campaigns.reduce((s, c) => {
+      if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
       if (c.google_campaign_id && _nSeenGids.has(c.google_campaign_id)) return s;
       _nSeenGids.add(c.google_campaign_id);
       return s + (c.latest_pacing?.actual_spend || 0);

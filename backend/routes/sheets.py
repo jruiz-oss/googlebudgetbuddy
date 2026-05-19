@@ -30,10 +30,14 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import Optional
 
 from flask import Blueprint, jsonify, request, session
 
-from database import Account, AccountSettings, Campaign, PacingData, db
+from database import (
+    Account, AccountSettings, Campaign, PacingData, db,
+    canonical_campaigns,
+)
 from routes.auth import login_required
 
 logger = logging.getLogger(__name__)
@@ -1343,9 +1347,12 @@ def sync_sheet_budgets_for_account(account_id: int) -> dict:
     return sync_google_ads_budgets_for_account(account_id)
 
 
-def write_sheet_spend_for_account(account_id: int) -> dict:
+def write_sheet_spend_for_account(account_id: int, segment_spend_by_label: Optional[dict] = None) -> dict:
     """Primary spend writeback entry point for Google BudgetBuddy."""
-    return write_google_ads_spend_for_account(account_id)
+    return write_google_ads_spend_for_account(
+        account_id,
+        segment_spend_by_label=segment_spend_by_label,
+    )
 
 
 def sync_google_ads_budgets_for_account(account_id: int) -> dict:
@@ -1401,7 +1408,7 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
     # which still have MTD spend this month also get the correct monthly_budget
     # and budget_label. Excluding is_active=False left them at 0, which then
     # overwrote the correct budget in the pacing segment aggregation.
-    db_campaigns = Campaign.query.filter_by(account_id=account_id).all()
+    db_campaigns = canonical_campaigns(Campaign.query.filter_by(account_id=account_id).all())
     logger.info(
         "Google Ads sync campaigns loaded: account_id=%s total_campaigns=%d",
         account.id,
@@ -1499,7 +1506,7 @@ def sync_google_ads_budgets_for_account(account_id: int) -> dict:
     }
 
 
-def write_google_ads_spend_for_account(account_id: int) -> dict:
+def write_google_ads_spend_for_account(account_id: int, segment_spend_by_label: Optional[dict] = None) -> dict:
     """Push MTD spend totals per segment row back to col D of the Google Ads section.
 
     Mirrors what the script did with updateSpendInSheet().
@@ -1521,14 +1528,15 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
     # matches what the pacing run computes. Using is_active=True only caused the
     # sheet to show a lower spend than the app whenever inactive campaigns had
     # MTD spend (e.g. campaigns paused mid-month).
-    db_campaigns = Campaign.query.filter_by(account_id=account_id).all()
+    db_campaigns = canonical_campaigns(Campaign.query.filter_by(account_id=account_id).all())
     logger.info(
-        "Google Ads spend write start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d all_campaigns=%d",
+        "Google Ads spend write start: account_id=%s account_name=%r sheet_tab=%r rows_found=%d canonical_campaigns=%d current_run_totals=%s",
         account.id,
         account.account_name,
         tab_name,
         len(sheet_rows),
         len(db_campaigns),
+        bool(segment_spend_by_label),
     )
     named_filters = [
         r["campaign_filter"].lower()
@@ -1573,37 +1581,30 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
             skipped.append({"label": label, "reason": "No matching campaigns"})
             continue
 
-        # Sum MTD spend from the latest PacingData for each campaign.
-        # Deduplicate by google_campaign_id (duplicate DB rows from re-imports
-        # would otherwise double the spend). Prefer today's PacingData so stale
-        # entries from old/buggy runs don't inflate the total.
+        # During a pacing run, use the fresh Google Ads API segment totals passed
+        # by pacing.py. This avoids re-reading stale/duplicate PacingData rows.
         from datetime import datetime as _dt
         _today = _dt.utcnow().date()
-        total_spend = 0.0
-        have_data = False
-        _seen_gids = set()
-        for c in matched:
-            if c.google_campaign_id and c.google_campaign_id in _seen_gids:
-                continue
-            _seen_gids.add(c.google_campaign_id)
-            # Prefer today's row; fall back to most recent if none yet today
-            pd_row = (
-                PacingData.query
-                .filter_by(campaign_id=c.id)
-                .filter(PacingData.date == _today)
-                .order_by(PacingData.id.desc())
-                .first()
-            )
-            if not pd_row:
+        if segment_spend_by_label is not None:
+            total_spend = float(segment_spend_by_label.get(label, 0.0) or 0.0)
+            have_data = label in segment_spend_by_label
+        else:
+            # Manual writeback is intentionally strict: only today's pacing rows
+            # are eligible. Falling back to older rows is how stale MTD totals
+            # leaked back into the sheet.
+            total_spend = 0.0
+            have_data = False
+            for c in matched:
                 pd_row = (
                     PacingData.query
                     .filter_by(campaign_id=c.id)
-                    .order_by(PacingData.date.desc(), PacingData.id.desc())
+                    .filter(PacingData.date == _today)
+                    .order_by(PacingData.id.desc())
                     .first()
                 )
-            if pd_row:
-                total_spend += pd_row.actual_spend or 0.0
-                have_data = True
+                if pd_row:
+                    total_spend += pd_row.actual_spend or 0.0
+                    have_data = True
 
         if not have_data:
             logger.info(
@@ -1619,6 +1620,14 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
         r_idx = row["row_index"]
         cell_updates.append({"range": f"D{r_idx}", "values": [[round(total_spend, 2)]]})
         written.append({"label": label, "spend": round(total_spend, 2), "row_index": r_idx})
+        logger.info(
+            "Google Ads spend write row total: account_id=%s row=%s label=%r spend=%.2f source=%s",
+            account.id,
+            r_idx,
+            label,
+            total_spend,
+            "current_run" if segment_spend_by_label is not None else "today_pacing_data",
+        )
 
     if cell_updates:
         _sheets_retry(ws.batch_update, cell_updates, value_input_option="USER_ENTERED")
