@@ -285,14 +285,15 @@ def run_pacing(account_id):
         )
         _cdaily = _latest[-1].current_daily_budget if _latest and _latest[-1].current_daily_budget else 0.0
 
-        # Only add spend once per unique Google campaign ID to avoid double-counting.
+        # Only add spend/count once per unique Google campaign ID to avoid
+        # double-counting when duplicate DB rows share the same campaign ID.
         if _c.google_campaign_id not in _counted_gids:
             _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
             seg_spend_map[_label] += _cspend
+            seg_count_map[_label] += 1   # count unique campaigns, not DB rows
             _counted_gids.add(_c.google_campaign_id)
 
         seg_daily_map[_label]  += _cdaily
-        seg_count_map[_label]  += 1
         # Use max so an inactive campaign with monthly_budget=0 never overwrites
         # the correct budget that was synced from the sheet onto an active campaign.
         if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
@@ -813,10 +814,10 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         if _c.google_campaign_id not in _counted_gids:
             _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
             seg_spend_map[_label] += _cspend
+            seg_count_map[_label] += 1   # count unique campaigns, not DB rows
             _counted_gids.add(_c.google_campaign_id)
 
         seg_daily_map[_label]  += _cdaily
-        seg_count_map[_label]  += 1
         # Use max so an inactive campaign with monthly_budget=0 never overwrites
         # the correct budget that was synced from the sheet onto an active campaign.
         if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):

@@ -39,13 +39,18 @@ function getSegments(account) {
   const campaigns = account.campaigns || [];
   if (!campaigns.length) return [];
   const map = {};
+  // Deduplicate by google_campaign_id so duplicate DB rows don't double-count spend.
+  const seenGids = new Set();
   for (const c of campaigns) {
     const label = c.budget_label || 'Primary';
     if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
     // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
     // correct budget that an active campaign in the same segment carries.
     map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
-    map[label].spend += c.latest_pacing?.actual_spend || 0;
+    if (!c.google_campaign_id || !seenGids.has(c.google_campaign_id)) {
+      seenGids.add(c.google_campaign_id);
+      map[label].spend += c.latest_pacing?.actual_spend || 0;
+    }
   }
   return Object.values(map);
 }
@@ -60,7 +65,14 @@ function accountPacing(account, daysIn, daysInMonth) {
     segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
   }
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
-  const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
+  // Deduplicate spend by google_campaign_id — duplicate DB rows would otherwise
+  // double-count every campaign's spend.
+  const seenGids = new Set();
+  const spend = campaigns.reduce((s, c) => {
+    if (c.google_campaign_id && seenGids.has(c.google_campaign_id)) return s;
+    seenGids.add(c.google_campaign_id);
+    return s + (c.latest_pacing?.actual_spend || 0);
+  }, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
   const segments = getSegments(account);
   return { monthly, spend, pace, segments };

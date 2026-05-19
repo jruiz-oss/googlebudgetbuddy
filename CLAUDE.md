@@ -166,6 +166,17 @@ On fresh deployments these are created automatically by `db.create_all()`.
 
 ## Change log
 
+### 2026-05-19 — Fix 2x MTD spend and $0 recommended daily (duplicate DB rows)
+**What:** Fixed MTD spend showing exactly 2x the real number, and recommended daily showing $0, caused by duplicate `google_campaign_id` rows in the DB (43 rows for ~21 unique campaigns).
+**Root causes:**
+- **Frontend spend double-counting:** `AccountDashboard.jsx`, `Home.jsx`, and `Notifications.jsx` all summed `c.latest_pacing?.actual_spend` over every DB campaign row. Since pacing.py writes the same per-Google-campaign spend to both duplicate rows, the frontend was counting each campaign's spend twice → 2x total. With 2x spend > monthly budget, `max(0, monthly - doubled_spend) = 0` → "Set daily to $0".
+- **Backend `seg_count_map` inflated:** `pacing.py` deduped `seg_spend_map` by `google_campaign_id` (existing fix) but still incremented `seg_count_map` for every DB row. This caused `rec = seg_rec / 43` instead of `/ ~21`, further shrinking per-campaign recommendations.
+**Fixes:**
+- `frontend/src/pages/AccountDashboard.jsx`: `getSegments()` and the top-level `spend` reduction both deduplicate by `google_campaign_id` using a `Set` before summing spend.
+- `frontend/src/pages/Home.jsx`: Same dedup applied to `getSegments()` and `accountPacing()`'s spend reduction.
+- `frontend/src/pages/Notifications.jsx`: Same dedup applied to spend reduction.
+- `backend/routes/pacing.py`: `seg_count_map` increment moved inside the `_counted_gids` guard in both `run_pacing` and `run_pacing_for_account`, so segment count reflects unique campaigns rather than DB rows.
+
 ### 2026-05-19 — Fix spend double-counting + stale recommendation display
 **What:** Fixed three bugs causing the app to show $12,042 MTD spend (should be $6,021) and $4,281 recommended daily (should be $128) for Goodwill AZ - Retail Grant and potentially other accounts.
 **Bug 1 — Spend double-counted via duplicate google_campaign_id:** The `seg_spend_map` loop in `run_pacing` and `run_pacing_for_account` ran once per DB campaign row. If two DB rows share the same `google_campaign_id` (e.g. an active + a re-imported duplicate), the API returns one spend value for that ID but both rows claimed it, doubling the segment spend. Fixed by tracking a `_counted_gids` set and only adding spend to `seg_spend_map` the first time each `google_campaign_id` is seen.

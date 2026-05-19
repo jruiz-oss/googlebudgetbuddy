@@ -17,7 +17,13 @@ function buildNotifications(accounts) {
       segBudgets[label] = c.monthly_budget || 0;
     }
     const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
-    const spend   = campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
+    // Deduplicate spend by google_campaign_id to avoid double-counting duplicate DB rows.
+    const _nSeenGids = new Set();
+    const spend = campaigns.reduce((s, c) => {
+      if (c.google_campaign_id && _nSeenGids.has(c.google_campaign_id)) return s;
+      _nSeenGids.add(c.google_campaign_id);
+      return s + (c.latest_pacing?.actual_spend || 0);
+    }, 0);
     if (monthly === 0 && spend === 0) continue;
 
     const idealSpend = monthly > 0 ? monthly * (daysIn / daysInMonth) : 0;
