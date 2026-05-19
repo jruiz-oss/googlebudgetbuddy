@@ -815,6 +815,21 @@ def run_all_pacing():
     return jsonify({'message': 'Pacing started — refresh the page in about 60 seconds.'}), 202
 
 
+@pacing_bp.route('/run-all/status', methods=['GET'])
+@login_required
+def run_all_status():
+    """Return whether a run-all pacing job is currently in progress.
+
+    The frontend polls this after kicking off /run-all so it knows exactly
+    when to reload rather than guessing with a fixed timeout.
+    """
+    running = not _pacing_all_lock.acquire(blocking=False)
+    if not running:
+        # We acquired the lock just to check — release it immediately.
+        _pacing_all_lock.release()
+    return jsonify({'running': running})
+
+
 # ---------------------------------------------------------------------------
 # /pause — manual auto-pause for an account
 # ---------------------------------------------------------------------------

@@ -557,20 +557,62 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     try {
       await axios.post('/api/pacing/run-all');
       // Backend returns 202 immediately — actual pacing runs in a background thread.
-      // Keep the button disabled and auto-refresh once the job should be done.
-      toast.info('Pacing running in background — page will refresh in ~60 seconds.');
-      setTimeout(() => {
-        setRunningAll(false);
-        load();
-        onAccountsChange?.();
-      }, 60000);
+      // Poll /run-all/status every 10s so we reload the moment it finishes
+      // rather than guessing with a fixed timeout.
+      toast.info('Pacing in progress — dashboard will update automatically when done.');
+      let elapsed = 0;
+      const MAX_WAIT_MS = 5 * 60 * 1000; // 5 min safety cap
+      const POLL_MS = 10000;
+      const pollId = setInterval(async () => {
+        elapsed += POLL_MS;
+        try {
+          const { data } = await axios.get('/api/pacing/run-all/status');
+          if (!data.running) {
+            clearInterval(pollId);
+            setRunningAll(false);
+            load();
+            onAccountsChange?.();
+            toast.success('Pacing complete — data updated!');
+          } else if (elapsed >= MAX_WAIT_MS) {
+            clearInterval(pollId);
+            setRunningAll(false);
+            load();
+            onAccountsChange?.();
+            toast.warn('Pacing is taking longer than expected — refreshed anyway.');
+          }
+        } catch {
+          // If the status check itself fails, stop polling and reload.
+          clearInterval(pollId);
+          setRunningAll(false);
+          load();
+        }
+      }, POLL_MS);
     } catch (e) {
       if (e.response?.status === 409) {
-        toast.warn('Pacing already in progress — check back in about a minute.');
+        toast.warn('Pacing already in progress — dashboard will update when it finishes.');
+        // Still poll so the button re-enables and data refreshes when done.
+        let elapsed = 0;
+        const MAX_WAIT_MS = 5 * 60 * 1000;
+        const POLL_MS = 10000;
+        const pollId = setInterval(async () => {
+          elapsed += POLL_MS;
+          try {
+            const { data } = await axios.get('/api/pacing/run-all/status');
+            if (!data.running || elapsed >= MAX_WAIT_MS) {
+              clearInterval(pollId);
+              setRunningAll(false);
+              load();
+              onAccountsChange?.();
+            }
+          } catch {
+            clearInterval(pollId);
+            setRunningAll(false);
+          }
+        }, POLL_MS);
       } else {
         toast.error(e.response?.data?.error || 'Run all pacing failed');
+        setRunningAll(false);
       }
-      setRunningAll(false);
     }
   };
 
