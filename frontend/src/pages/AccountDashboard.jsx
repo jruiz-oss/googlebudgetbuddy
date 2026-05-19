@@ -29,11 +29,19 @@ function fmtPct(n) { return (n > 0 ? '+' : '') + (n || 0).toFixed(1) + '%'; }
 
 function getSegments(campaigns) {
   if (!campaigns.length) return [];
+  // Only use campaigns from the most recent pacing run. Campaigns with older
+  // pacing dates are stale (from pre-fix runs or campaigns no longer spending)
+  // and would inflate the total.
+  const mostRecentDate = campaigns.reduce((latest, c) => {
+    const d = c.latest_pacing?.date;
+    if (!d) return latest;
+    return !latest || d > latest ? d : latest;
+  }, null);
   const map = {};
-  // Deduplicate by google_campaign_id so duplicate DB rows (re-imports) don't
-  // double-count spend within a segment.
   const seenGids = new Set();
   for (const c of campaigns) {
+    // Skip campaigns not paced in the most recent run
+    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
     const label = c.budget_label || 'Primary';
     if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
     // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
@@ -443,10 +451,16 @@ export default function AccountDashboard({ onPacingComplete }) {
     segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
-  // Deduplicate spend by google_campaign_id — duplicate DB rows (re-imports)
-  // would otherwise double-count every campaign's spend.
+  // Only sum spend from the most recent pacing run to avoid stale campaigns
+  // (from old/buggy runs) inflating the total. Also dedup by google_campaign_id.
+  const _mostRecentDate = campaigns.reduce((latest, c) => {
+    const d = c.latest_pacing?.date;
+    if (!d) return latest;
+    return !latest || d > latest ? d : latest;
+  }, null);
   const _spendSeenGids = new Set();
   const spend = campaigns.reduce((s, c) => {
+    if (_mostRecentDate && c.latest_pacing?.date !== _mostRecentDate) return s;
     if (c.google_campaign_id && _spendSeenGids.has(c.google_campaign_id)) return s;
     _spendSeenGids.add(c.google_campaign_id);
     return s + (c.latest_pacing?.actual_spend || 0);

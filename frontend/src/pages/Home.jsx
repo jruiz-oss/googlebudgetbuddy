@@ -38,14 +38,18 @@ function fmtPct(n) {
 function getSegments(account) {
   const campaigns = account.campaigns || [];
   if (!campaigns.length) return [];
+  // Only use the most recent pacing run's data — older entries are stale.
+  const mostRecentDate = campaigns.reduce((latest, c) => {
+    const d = c.latest_pacing?.date;
+    if (!d) return latest;
+    return !latest || d > latest ? d : latest;
+  }, null);
   const map = {};
-  // Deduplicate by google_campaign_id so duplicate DB rows don't double-count spend.
   const seenGids = new Set();
   for (const c of campaigns) {
+    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
     const label = c.budget_label || 'Primary';
     if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
-    // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
-    // correct budget that an active campaign in the same segment carries.
     map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
     if (!c.google_campaign_id || !seenGids.has(c.google_campaign_id)) {
       seenGids.add(c.google_campaign_id);
@@ -60,15 +64,19 @@ function accountPacing(account, daysIn, daysInMonth) {
   const segBudgets = {};
   for (const c of campaigns) {
     const label = c.budget_label || 'Primary';
-    // Use Math.max so an inactive campaign with monthly_budget=0 never
-    // overwrites the correct budget synced from the sheet for an active campaign.
     segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
   }
   const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
-  // Deduplicate spend by google_campaign_id — duplicate DB rows would otherwise
-  // double-count every campaign's spend.
+  // Only sum spend from the most recent pacing run (avoid stale campaigns).
+  // Also dedup by google_campaign_id to handle duplicate DB rows.
+  const mostRecentDate = campaigns.reduce((latest, c) => {
+    const d = c.latest_pacing?.date;
+    if (!d) return latest;
+    return !latest || d > latest ? d : latest;
+  }, null);
   const seenGids = new Set();
   const spend = campaigns.reduce((s, c) => {
+    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
     if (c.google_campaign_id && seenGids.has(c.google_campaign_id)) return s;
     seenGids.add(c.google_campaign_id);
     return s + (c.latest_pacing?.actual_spend || 0);

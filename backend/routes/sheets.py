@@ -1573,16 +1573,34 @@ def write_google_ads_spend_for_account(account_id: int) -> dict:
             skipped.append({"label": label, "reason": "No matching campaigns"})
             continue
 
-        # Sum MTD spend from the latest PacingData for each campaign
+        # Sum MTD spend from the latest PacingData for each campaign.
+        # Deduplicate by google_campaign_id (duplicate DB rows from re-imports
+        # would otherwise double the spend). Prefer today's PacingData so stale
+        # entries from old/buggy runs don't inflate the total.
+        from datetime import datetime as _dt
+        _today = _dt.utcnow().date()
         total_spend = 0.0
         have_data = False
+        _seen_gids = set()
         for c in matched:
+            if c.google_campaign_id and c.google_campaign_id in _seen_gids:
+                continue
+            _seen_gids.add(c.google_campaign_id)
+            # Prefer today's row; fall back to most recent if none yet today
             pd_row = (
                 PacingData.query
                 .filter_by(campaign_id=c.id)
-                .order_by(PacingData.date.desc(), PacingData.id.desc())
+                .filter(PacingData.date == _today)
+                .order_by(PacingData.id.desc())
                 .first()
             )
+            if not pd_row:
+                pd_row = (
+                    PacingData.query
+                    .filter_by(campaign_id=c.id)
+                    .order_by(PacingData.date.desc(), PacingData.id.desc())
+                    .first()
+                )
             if pd_row:
                 total_spend += pd_row.actual_spend or 0.0
                 have_data = True
