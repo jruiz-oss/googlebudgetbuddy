@@ -447,7 +447,7 @@ export default function AccountDashboard() {
                         <td style={{ fontWeight: 500, cursor: 'pointer' }} onClick={e => { e.stopPropagation(); navigate(`/campaigns/${rec.campaign_id}`); }}>
                           {rec.campaign_name}
                         </td>
-                        <td>${rec.monthly_budget?.toFixed(2)}</td>
+                        <td>{recs.length > 1 ? <span className="bb-muted">—</span> : `$${rec.monthly_budget?.toFixed(2)}`}</td>
                         <td>${rec.actual_spend?.toFixed(2)}</td>
                         <td>{(rec.pace_ratio * 100).toFixed(1)}%</td>
                         <td>${rec.current_daily_budget?.toFixed(2)}</td>
@@ -542,7 +542,7 @@ export default function AccountDashboard() {
                     ...camps.map(c => (
                       <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
                         <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
-                        <td>${(c.monthly_budget || 0).toFixed(2)}</td>
+                        <td>{camps.length > 1 ? <span className="bb-muted">—</span> : `$${(c.monthly_budget || 0).toFixed(2)}`}</td>
                         <td>{c.latest_pacing ? `$${c.latest_pacing.actual_spend?.toFixed(2)}` : '—'}</td>
                         <td><StatusPill status={c.latest_pacing?.status} /></td>
                         <td><span className="bb-muted" style={{ fontSize: '13px' }}>{c.flight_type === 'ALWAYS_ON' ? 'Always On' : `${c.flight_start_date} → ${c.flight_end_date}`}</span></td>
