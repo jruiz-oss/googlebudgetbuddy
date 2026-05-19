@@ -79,35 +79,19 @@ def visible_latest_campaigns(campaigns):
     """
     canonical = canonical_campaigns(campaigns)
     latest_date = latest_pacing_date(canonical)
-    month_start = date.today().replace(day=1)
     visible = []
     for campaign in canonical:
         latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
         has_spend_latest = latest and (latest.actual_spend or 0) > 0
-        has_spend_month = campaign.has_spend_this_month()
+        has_been_paced   = latest is not None
 
-        # Zombie check 1: google_end_date set and ended before this month
-        ended_before_month = (
-            campaign.google_end_date is not None
-            and campaign.google_end_date < month_start
-        )
-        if ended_before_month and not has_spend_month:
-            continue  # skip zombie
-
-        # Zombie check 2 (fallback when google_end_date not yet populated):
-        # A campaign that has pacing rows from a prior month but zero spend this
-        # month is almost certainly dead — Google Ads left it ENABLED but it
-        # hasn't run. This fires immediately without needing a sync to populate
-        # google_end_date on existing rows.
-        has_prior_month_pacing = any(
-            p.date and p.date < month_start
-            for p in (campaign.pacing_data or [])
-        )
-        if has_prior_month_pacing and not has_spend_month:
-            continue  # skip zombie (pacing-history fallback)
-
-        if campaign.is_active or has_spend_latest:
+        if has_spend_latest:
+            # Has spend in the most recent run → always show
             visible.append(campaign)
+        elif not has_been_paced and campaign.is_active:
+            # Never been paced + marked active → brand-new campaign, show it
+            visible.append(campaign)
+        # else: has been paced but $0 spend → zombie, skip
     return visible
 
 

@@ -197,16 +197,16 @@ def _is_zombie_campaign(campaign, today, api_spend):
 
     month_start = today.replace(day=1)
 
-    # Path 1: explicit end date
+    # Path 1: explicit Google Ads end_date (populated after a sync)
     if campaign.google_end_date is not None:
         return campaign.google_end_date < month_start
 
-    # Path 2: pacing history from a prior month = campaign existed and ran before,
-    # but has no spend this month → treat as zombie
-    return any(
-        p.date and p.date < month_start
-        for p in (campaign.pacing_data or [])
-    )
+    # Path 2: has ANY prior pacing data + $0 API spend this month.
+    # If the campaign has been paced before and still shows no spend,
+    # it's dead. Campaigns with no pacing data at all are brand-new and
+    # should still be included. _delete_today_pacing_data() runs after
+    # this check so any rows here are from a prior run.
+    return bool(campaign.pacing_data)
 
 
 def _campaigns_for_pacing(account, today, metrics_by_id):
