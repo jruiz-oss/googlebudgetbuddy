@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Activity } from 'lucide-react';
 import axios from 'axios';
 import { useAuth } from '../App';
+import Logo from '../components/Logo';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -31,7 +31,7 @@ export default function Login() {
     <div className="bb-auth-page">
       <div className="bb-auth-card">
         <div className="bb-auth-brand">
-          <span className="bb-brand-pill"><Activity size={20} /></span>
+          <Logo size={56} style={{ margin: '0 auto 8px' }} />
           <h1 className="bb-page-title" style={{ marginBottom: 0 }}>Google BudgetBuddy</h1>
         </div>
         <p className="bb-muted" style={{ textAlign: 'center', marginBottom: '24px' }}>Sign in to your account</p>

@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Bell, Settings, LogOut } from 'lucide-react';
 import { useAuth } from '../App';
 import { useToast } from './Toast';
+import Logo from './Logo';
 
 function accountPaceStatus(account) {
   const s = account.pacing_status;
@@ -32,7 +33,7 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
     <aside className="sidebar">
       {/* Brand */}
       <div className="sidebar-brand">
-        <div className="mark">B</div>
+        <Logo size={36} />
         <div>
           <div className="name">BudgetBuddy</div>
           <div className="sub">Google Ads pacing</div>
