@@ -38,8 +38,30 @@ function fmtPct(n) {
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
 }
+function campaignKey(c) {
+  const digits = String(c.google_campaign_id || '').replace(/\D/g, '');
+  return digits || `db:${c.id}`;
+}
+function uniqueCampaigns(campaigns) {
+  const byKey = new Map();
+  for (const c of campaigns || []) {
+    const key = campaignKey(c);
+    const prev = byKey.get(key);
+    if (!prev || (!prev.budget_resource_name && c.budget_resource_name)) byKey.set(key, c);
+  }
+  return [...byKey.values()];
+}
 
 function getSegments(account) {
+  if (Array.isArray(account.segment_summaries) && account.segment_summaries.length) {
+    return account.segment_summaries.map(s => ({
+      name: s.name,
+      monthly: s.monthly || 0,
+      spend: s.spend || 0,
+      currentDaily: s.current_daily || 0,
+      campaignCount: s.campaign_count || 0,
+    }));
+  }
   const campaigns = account.campaigns || [];
   if (!campaigns.length) return [];
   // Only use the most recent pacing run's data — older entries are stale.
@@ -50,13 +72,14 @@ function getSegments(account) {
   }, null);
   const map = {};
   const seenGids = new Set();
-  for (const c of campaigns) {
+  for (const c of uniqueCampaigns(campaigns)) {
     if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
     const label = c.budget_label || 'Primary';
     if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
     map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
-    if (!c.google_campaign_id || !seenGids.has(c.google_campaign_id)) {
-      seenGids.add(c.google_campaign_id);
+    const key = campaignKey(c);
+    if (!seenGids.has(key)) {
+      seenGids.add(key);
       map[label].spend += c.latest_pacing?.actual_spend || 0;
     }
   }
@@ -66,11 +89,13 @@ function getSegments(account) {
 function accountPacing(account, daysIn, daysInMonth) {
   const campaigns = account.campaigns || [];
   const segBudgets = {};
-  for (const c of campaigns) {
+  for (const c of uniqueCampaigns(campaigns)) {
     const label = c.budget_label || 'Primary';
     segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
   }
-  const monthly = Object.values(segBudgets).reduce((s, b) => s + b, 0);
+  const monthly = typeof account.total_monthly_budget === 'number'
+    ? account.total_monthly_budget
+    : Object.values(segBudgets).reduce((s, b) => s + b, 0);
   // Only sum spend from the most recent pacing run (avoid stale campaigns).
   // Also dedup by google_campaign_id to handle duplicate DB rows.
   const mostRecentDate = campaigns.reduce((latest, c) => {
@@ -79,12 +104,15 @@ function accountPacing(account, daysIn, daysInMonth) {
     return !latest || d > latest ? d : latest;
   }, null);
   const seenGids = new Set();
-  const spend = campaigns.reduce((s, c) => {
-    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
-    if (c.google_campaign_id && seenGids.has(c.google_campaign_id)) return s;
-    seenGids.add(c.google_campaign_id);
-    return s + (c.latest_pacing?.actual_spend || 0);
-  }, 0);
+  const spend = typeof account.mtd_spend === 'number'
+    ? account.mtd_spend
+    : campaigns.reduce((s, c) => {
+      if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
+      const key = campaignKey(c);
+      if (seenGids.has(key)) return s;
+      seenGids.add(key);
+      return s + (c.latest_pacing?.actual_spend || 0);
+    }, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
   const segments = getSegments(account);
   return { monthly, spend, pace, segments };
@@ -491,7 +519,7 @@ export default function Home({ onAccountsChange, accounts: propAccounts }) {
 
     // Build one adjustment per campaign, preserving each campaign's current
     // daily-budget share instead of forcing an even split.
-    const eligible = (item.campaigns || []).filter(c => c.budget_resource_name);
+    const eligible = uniqueCampaigns(item.campaigns || []).filter(c => c.budget_resource_name);
     if (!eligible.length) {
       toast.warn('No campaigns have a budget resource name yet — run pacing first to populate them.');
       return;

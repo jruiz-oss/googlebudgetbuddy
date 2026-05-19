@@ -15,8 +15,10 @@ from database import (  # noqa: E402
     AccountSettings,
     Campaign,
     PacingData,
+    campaign_mtd_spend_total,
     canonical_campaigns,
     db,
+    segment_spend_summaries,
     visible_latest_campaigns,
 )
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
@@ -101,6 +103,35 @@ class SpendAccuracyTest(unittest.TestCase):
         result = visible_latest_campaigns([canonical, duplicate])
 
         self.assertEqual([c.id for c in result], [1])
+
+    def test_normalized_campaign_ids_are_counted_once_in_totals(self):
+        latest = date(2026, 5, 19)
+        first = Campaign(
+            id=1,
+            campaign_name='Campaign',
+            google_campaign_id='123456',
+            budget_label='Primary',
+            monthly_budget=1000,
+            is_active=True,
+        )
+        duplicate = Campaign(
+            id=2,
+            campaign_name='Campaign Duplicate',
+            google_campaign_id='123-456',
+            budget_label='Primary',
+            monthly_budget=1000,
+            is_active=True,
+        )
+        first.pacing_data = [PacingData(date=latest, actual_spend=250)]
+        duplicate.pacing_data = [PacingData(date=latest, actual_spend=250)]
+
+        canonical = canonical_campaigns([first, duplicate])
+        total = campaign_mtd_spend_total(canonical)
+        segments = segment_spend_summaries(canonical)
+
+        self.assertEqual(len(canonical), 1)
+        self.assertEqual(total, 250)
+        self.assertEqual(segments[0]['spend'], 250)
 
     def test_delete_today_pacing_data_removes_stale_same_day_rows(self):
         account = Account(user_id=1, account_name='Acct', google_customer_id='111')

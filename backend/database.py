@@ -5,6 +5,13 @@ from sqlalchemy.types import String, TypeDecorator
 db = SQLAlchemy()
 
 
+def campaign_identity_key(campaign):
+    """Stable key for one real Google Ads campaign, tolerant of old ID formats."""
+    raw = getattr(campaign, 'google_campaign_id', None)
+    digits = ''.join(ch for ch in str(raw or '') if ch.isdigit())
+    return digits or f"db:{getattr(campaign, 'id', None) or id(campaign)}"
+
+
 def _campaign_latest_pacing(campaign, latest_date=None):
     """Return the latest pacing row, optionally constrained to a specific date."""
     rows = [
@@ -30,7 +37,7 @@ def canonical_campaigns(campaigns):
     """
     grouped = {}
     for campaign in campaigns or []:
-        key = campaign.google_campaign_id or f"db:{campaign.id or id(campaign)}"
+        key = campaign_identity_key(campaign)
         grouped.setdefault(key, []).append(campaign)
 
     canonical = []
@@ -80,6 +87,65 @@ def segment_budget_total(campaigns):
         label = campaign.budget_label or 'Primary'
         budgets[label] = max(budgets.get(label, 0), campaign.monthly_budget or 0)
     return sum(budgets.values())
+
+
+def campaign_mtd_spend_total(campaigns, latest_date=None):
+    """Sum latest-run MTD spend once per normalized Google campaign ID."""
+    latest_date = latest_date or latest_pacing_date(campaigns)
+    if not latest_date:
+        return 0.0
+
+    total = 0.0
+    seen = set()
+    for campaign in campaigns or []:
+        key = campaign_identity_key(campaign)
+        if key in seen:
+            continue
+        latest = _campaign_latest_pacing(campaign, latest_date)
+        if not latest:
+            continue
+        seen.add(key)
+        total += latest.actual_spend or 0.0
+    return total
+
+
+def segment_spend_summaries(campaigns):
+    """Return deduped segment budget/spend/current-daily summaries."""
+    latest_date = latest_pacing_date(campaigns)
+    summaries = {}
+    seen_spend = set()
+
+    for campaign in campaigns or []:
+        label = campaign.budget_label or 'Primary'
+        row = summaries.setdefault(label, {
+            'name': label,
+            'monthly': 0.0,
+            'spend': 0.0,
+            'current_daily': 0.0,
+            'campaign_count': 0,
+        })
+        row['monthly'] = max(row['monthly'], campaign.monthly_budget or 0.0)
+        row['current_daily'] += campaign.current_daily_budget or 0.0
+        row['campaign_count'] += 1
+
+        key = campaign_identity_key(campaign)
+        if key in seen_spend:
+            continue
+        latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
+        if latest:
+            seen_spend.add(key)
+            row['spend'] += latest.actual_spend or 0.0
+
+    return [
+        {
+            'name': row['name'],
+            'monthly': round(row['monthly'], 2),
+            'spend': round(row['spend'], 2),
+            'current_daily': round(row['current_daily'], 2),
+            'campaign_count': row['campaign_count'],
+        }
+        for row in sorted(summaries.values(), key=lambda r: r['name'].lower())
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +237,9 @@ class Account(db.Model):
         # history but never participate in live totals.
         visible_campaigns = visible_latest_campaigns(self.campaigns)
         total_monthly_budget = segment_budget_total(visible_campaigns)
+        latest_date = latest_pacing_date(visible_campaigns)
+        total_mtd_spend = campaign_mtd_spend_total(visible_campaigns, latest_date)
+        segments = segment_spend_summaries(visible_campaigns)
 
         on_track = over_pacing = under_pacing = 0
         for c in visible_campaigns:
@@ -203,6 +272,9 @@ class Account(db.Model):
             'created_at': self.created_at.isoformat(),
             'campaign_count': len(visible_campaigns),
             'total_monthly_budget': round(total_monthly_budget, 2),
+            'mtd_spend': round(total_mtd_spend, 2),
+            'latest_pacing_date': latest_date.isoformat() if latest_date else None,
+            'segment_summaries': segments,
             'status_category': status_category,
             'pacing_status': {
                 'on_track': on_track,

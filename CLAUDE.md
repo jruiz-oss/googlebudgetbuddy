@@ -173,6 +173,14 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-19 — Harden MTD totals against remaining duplicate rows
+**What:** Added normalized Google campaign ID deduping to backend account totals and frontend fallback aggregation.
+**Why:** Some production accounts still showed exactly 2x MTD spend, which indicates one remaining path was summing duplicate DB campaign rows/pacing snapshots.
+**Changes:**
+- `backend/database.py`: Added `campaign_identity_key()`, deduped account-level `mtd_spend`, latest pacing date, and segment summaries using normalized numeric Google campaign IDs.
+- `frontend/src/pages/Home.jsx`, `AccountDashboard.jsx`, `Notifications.jsx`: Fallback spend/current-daily/apply calculations now dedupe by normalized campaign ID, and Home prefers backend-provided MTD/segment totals when available.
+- `backend/tests/test_spend_accuracy.py`: Added regression coverage for duplicate campaign IDs with different formatting being counted once.
+
 ### 2026-05-19 — Add startup checks for additive DB columns
 **What:** Added a lightweight Postgres migration pass during backend startup for additive campaign/pacing columns.
 **Why:** Production account loading failed after `Campaign.current_daily_budget` was deployed before the DB column existed; `/api/campaigns/all` crashed with `UndefinedColumn`.

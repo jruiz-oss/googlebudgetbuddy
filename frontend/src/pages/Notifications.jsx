@@ -1,6 +1,11 @@
 import { useState, useMemo } from 'react';
 import { Check, Settings } from 'lucide-react';
 
+function campaignKey(c) {
+  const digits = String(c.google_campaign_id || '').replace(/\D/g, '');
+  return digits || `db:${c.id}`;
+}
+
 // Generate notifications from real account pacing data
 function buildNotifications(accounts) {
   const today = new Date();
@@ -24,12 +29,15 @@ function buildNotifications(accounts) {
     }, null);
     // Deduplicate spend by google_campaign_id and only use the latest pacing run.
     const _nSeenGids = new Set();
-    const spend = campaigns.reduce((s, c) => {
-      if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
-      if (c.google_campaign_id && _nSeenGids.has(c.google_campaign_id)) return s;
-      _nSeenGids.add(c.google_campaign_id);
-      return s + (c.latest_pacing?.actual_spend || 0);
-    }, 0);
+    const spend = typeof account.mtd_spend === 'number'
+      ? account.mtd_spend
+      : campaigns.reduce((s, c) => {
+        if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
+        const key = campaignKey(c);
+        if (_nSeenGids.has(key)) return s;
+        _nSeenGids.add(key);
+        return s + (c.latest_pacing?.actual_spend || 0);
+      }, 0);
     if (monthly === 0 && spend === 0) continue;
 
     const idealSpend = monthly > 0 ? monthly * (daysIn / daysInMonth) : 0;

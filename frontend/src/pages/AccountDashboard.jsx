@@ -30,9 +30,22 @@ function fmtPct(n) { return (n > 0 ? '+' : '') + (n || 0).toFixed(1) + '%'; }
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
 }
+function campaignKey(c) {
+  const digits = String(c.google_campaign_id || '').replace(/\D/g, '');
+  return digits || `db:${c.id}`;
+}
+function uniqueCampaigns(campaigns) {
+  const byKey = new Map();
+  for (const c of campaigns || []) {
+    const key = campaignKey(c);
+    const prev = byKey.get(key);
+    if (!prev || (!prev.budget_resource_name && c.budget_resource_name)) byKey.set(key, c);
+  }
+  return [...byKey.values()];
+}
 
 function allocateByCurrentShare(campaigns, totalDaily) {
-  const eligible = campaigns.filter(c => c.budget_resource_name);
+  const eligible = uniqueCampaigns(campaigns).filter(c => c.budget_resource_name);
   if (!eligible.length) return [];
   const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
   const even = Math.round((totalDaily / eligible.length) * 100) / 100;
@@ -57,7 +70,7 @@ function getSegments(campaigns) {
   }, null);
   const map = {};
   const seenGids = new Set();
-  for (const c of campaigns) {
+  for (const c of uniqueCampaigns(campaigns)) {
     const label = c.budget_label || 'Primary';
     if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0, currentDaily: 0, campaignCount: 0 };
     // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
@@ -66,9 +79,9 @@ function getSegments(campaigns) {
     // Only add spend once per unique Google campaign ID.
     if (
       (!mostRecentDate || c.latest_pacing?.date === mostRecentDate) &&
-      (!c.google_campaign_id || !seenGids.has(c.google_campaign_id))
+      !seenGids.has(campaignKey(c))
     ) {
-      seenGids.add(c.google_campaign_id);
+      seenGids.add(campaignKey(c));
       map[label].spend += c.latest_pacing?.actual_spend || 0;
     }
     map[label].currentDaily += currentDaily(c);
@@ -416,7 +429,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         // item.segmentOf is set when this is a per-segment row; item.name is the segment label.
         // For single-budget accounts item.segmentOf is undefined — use all campaigns.
         const segLabel = item.segmentOf ? item.name : null;
-        const eligible = campaigns.filter(c =>
+        const eligible = uniqueCampaigns(campaigns).filter(c =>
           c.budget_resource_name &&
           (segLabel === null || (c.budget_label || 'Primary') === segLabel)
         );
@@ -476,7 +489,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   const segments    = getSegments(campaigns);
   const isSegmented = segments.length > 1;
   const segBudgets  = {};
-  for (const c of campaigns) {
+  for (const c of uniqueCampaigns(campaigns)) {
     const l = c.budget_label || 'Primary';
     segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
@@ -491,12 +504,13 @@ export default function AccountDashboard({ onPacingComplete }) {
   const _spendSeenGids = new Set();
   const spend = campaigns.reduce((s, c) => {
     if (_mostRecentDate && c.latest_pacing?.date !== _mostRecentDate) return s;
-    if (c.google_campaign_id && _spendSeenGids.has(c.google_campaign_id)) return s;
-    _spendSeenGids.add(c.google_campaign_id);
+    const key = campaignKey(c);
+    if (_spendSeenGids.has(key)) return s;
+    _spendSeenGids.add(key);
     return s + (c.latest_pacing?.actual_spend || 0);
   }, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
-  const currentDailyTotal = campaigns.reduce((s, c) => s + currentDaily(c), 0);
+  const currentDailyTotal = uniqueCampaigns(campaigns).reduce((s, c) => s + currentDaily(c), 0);
 
   // Always compute recommended daily fresh from the current budget and spend.
   // Relying on recFromBackend (stored DB value) causes stale recommendations to
