@@ -313,6 +313,8 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
           campaign.id,
           campaign.status,
           campaign.advertising_channel_type,
+          campaign_budget.amount_micros,
+          campaign_budget.resource_name,
           metrics.cost_micros,
           metrics.clicks,
           metrics.conversions
@@ -331,11 +333,19 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
         if channel_type in _PHANTOM_CHANNEL_TYPES:
             continue
         m = r.get('metrics', {})
+        b = r.get('campaignBudget', {})
         micros = int(m.get('costMicros', 0) or 0)
         clicks = int(m.get('clicks', 0) or 0)
         conversions = float(m.get('conversions', 0) or 0)
         if cid not in result:
-            result[cid] = {'spend': 0.0, 'clicks': 0, 'conversions': 0.0}
+            budget_micros = int(b.get('amountMicros', 0) or 0)
+            result[cid] = {
+                'spend': 0.0,
+                'clicks': 0,
+                'conversions': 0.0,
+                'daily_budget_usd': round(budget_micros / 1_000_000, 2),
+                'budget_resource_name': b.get('resourceName', ''),
+            }
         result[cid]['spend'] += micros / 1_000_000
         result[cid]['clicks'] += clicks
         result[cid]['conversions'] += conversions

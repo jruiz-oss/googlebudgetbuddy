@@ -75,6 +75,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         campaign = canonical_campaigns(existing_rows)[0]
         campaign.campaign_name = live_campaign['campaign_name']
         campaign.budget_resource_name = live_campaign.get('budget_resource_name')
+        campaign.current_daily_budget = live_campaign.get('daily_budget_usd')
         campaign.is_active = is_live
 
         # Keep duplicate rows for historical integrity, but make sure they can no
@@ -90,6 +91,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         google_campaign_id=cid,
         monthly_budget=0.0,
         budget_resource_name=live_campaign.get('budget_resource_name'),
+        current_daily_budget=live_campaign.get('daily_budget_usd'),
         is_active=is_live,
     )
     db.session.add(campaign)

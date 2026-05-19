@@ -27,6 +27,23 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
 
 function fmt(n) { return '$' + Math.round(n || 0).toLocaleString('en-US'); }
 function fmtPct(n) { return (n > 0 ? '+' : '') + (n || 0).toFixed(1) + '%'; }
+function currentDaily(c) {
+  return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
+}
+
+function allocateByCurrentShare(campaigns, totalDaily) {
+  const eligible = campaigns.filter(c => c.budget_resource_name);
+  if (!eligible.length) return [];
+  const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
+  const even = Math.round((totalDaily / eligible.length) * 100) / 100;
+  return eligible.map(c => ({
+    campaign_id:          c.id,
+    budget_resource_name: c.budget_resource_name,
+    new_daily_budget:     totalCurrent > 0
+      ? Math.round((totalDaily * (currentDaily(c) / totalCurrent)) * 100) / 100
+      : even,
+  }));
+}
 
 function getSegments(campaigns) {
   if (!campaigns.length) return [];
@@ -41,18 +58,21 @@ function getSegments(campaigns) {
   const map = {};
   const seenGids = new Set();
   for (const c of campaigns) {
-    // Skip campaigns not paced in the most recent run
-    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
     const label = c.budget_label || 'Primary';
-    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
+    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0, currentDaily: 0, campaignCount: 0 };
     // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
     // correct budget that an active campaign in the same segment carries.
     map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
     // Only add spend once per unique Google campaign ID.
-    if (!c.google_campaign_id || !seenGids.has(c.google_campaign_id)) {
+    if (
+      (!mostRecentDate || c.latest_pacing?.date === mostRecentDate) &&
+      (!c.google_campaign_id || !seenGids.has(c.google_campaign_id))
+    ) {
       seenGids.add(c.google_campaign_id);
       map[label].spend += c.latest_pacing?.actual_spend || 0;
     }
+    map[label].currentDaily += currentDaily(c);
+    map[label].campaignCount += 1;
   }
   return Object.values(map);
 }
@@ -185,7 +205,7 @@ function ApplyModal({ item, onClose, onConfirm }) {
             <tbody>
               {item.segments.map(s => {
                 const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
-                return <tr key={s.name}><td>{s.name}</td><td>{fmt(sp.dailyCurrent)}</td><td className="new-daily">{fmt(sp.dailyRec)}</td></tr>;
+                return <tr key={s.name}><td>{s.name}</td><td>{fmt(s.currentDaily ?? sp.dailyCurrent)}</td><td className="new-daily">{fmt(sp.dailyRec)}</td></tr>;
               })}
             </tbody>
           </table>
@@ -371,13 +391,20 @@ export default function AccountDashboard({ onPacingComplete }) {
     setApplying(true);
     try {
       if (item.bulk) {
-        // Bulk apply: use the recommended_daily_budget from the last pacing run (most accurate,
-        // already accounts for per-campaign segment splits done server-side).
-        const adjustments = recommendations.map(r => ({
-          campaign_id:          r.campaign_id,
-          budget_resource_name: r.budget_resource_name,
-          new_daily_budget:     r.recommended_daily_budget,
-        }));
+        // Bulk apply: backend recs already preserve each campaign's current
+        // daily-budget ratio. If no run is loaded, preserve ratios in the UI.
+        const { daysIn: di, daysInMonth: dim } = getDaysInfo();
+        const adjustments = recommendations.length
+          ? recommendations.map(r => ({
+              campaign_id:          r.campaign_id,
+              budget_resource_name: r.budget_resource_name,
+              new_daily_budget:     r.recommended_daily_budget,
+            }))
+          : item.segments.flatMap(s => {
+              const sp = computePace(s.monthly, s.spend, di, dim);
+              const segCampaigns = campaigns.filter(c => (c.budget_label || 'Primary') === s.name);
+              return allocateByCurrentShare(segCampaigns, sp.dailyRec);
+            });
         if (!adjustments.length) {
           toast.warn('Run pacing first to generate recommendations, then apply.');
           return;
@@ -399,18 +426,20 @@ export default function AccountDashboard({ onPacingComplete }) {
           return;
         }
 
-        // Use each campaign's backend-stored recommended daily budget (already segment-split).
-        // Fall back to an equal split of the frontend-calculated rec only if no pacing data exists.
+        // Use each campaign's backend-stored recommended daily budget (already
+        // ratio-preserving). Fall back to preserving current daily-budget shares.
         const hasPacingData = eligible.some(c => c.latest_pacing?.recommended_daily_budget != null);
         const { daysIn: di, daysInMonth: dim } = getDaysInfo();
         const fallbackRec = computePace(item.monthly, item.spend, di, dim).dailyRec;
-        const fallbackPerCampaign = Math.round((fallbackRec / eligible.length) * 100) / 100;
+        const fallbackById = new Map(
+          allocateByCurrentShare(eligible, fallbackRec).map(a => [a.campaign_id, a.new_daily_budget])
+        );
         const adjustments = eligible.map(c => ({
           campaign_id:          c.id,
           budget_resource_name: c.budget_resource_name,
           new_daily_budget:     hasPacingData
-            ? (c.latest_pacing?.recommended_daily_budget ?? fallbackPerCampaign)
-            : fallbackPerCampaign,
+            ? (c.latest_pacing?.recommended_daily_budget ?? fallbackById.get(c.id) ?? 0)
+            : (fallbackById.get(c.id) ?? 0),
         }));
 
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
@@ -467,6 +496,7 @@ export default function AccountDashboard({ onPacingComplete }) {
     return s + (c.latest_pacing?.actual_spend || 0);
   }, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
+  const currentDailyTotal = campaigns.reduce((s, c) => s + currentDaily(c), 0);
 
   // Always compute recommended daily fresh from the current budget and spend.
   // Relying on recFromBackend (stored DB value) causes stale recommendations to
@@ -517,7 +547,7 @@ export default function AccountDashboard({ onPacingComplete }) {
       <div className="statgrid">
         <div className="s"><div className="sk">MTD Spend</div><div className="sv">{fmt(spend)}</div><div className="ssub">{pace.pctOfBudget.toFixed(0)}% of monthly · thru d{daysIn}</div></div>
         <div className="s"><div className="sk">Monthly Budget</div><div className="sv">{fmt(monthly)}</div><div className="ssub">{fmt(monthly - spend)} remaining</div></div>
-        <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(pace.dailyCurrent)}</div><div className="ssub">avg of {daysIn} days</div></div>
+        <div className="s"><div className="sk">Daily — Current</div><div className="sv">{fmt(currentDailyTotal)}</div><div className="ssub">live Google Ads budgets</div></div>
         <div className="s featured"><div className="sk">Daily — Recommended</div><div className="sv">{fmt(displayRec)}</div><div className="ssub accent">over {pace.daysLeft} remaining days</div></div>
         <div className="s"><div className="sk">Pace</div><div className={`sv ${pace.status}`}>{fmtPct(pace.deltaPct)}</div><div className="ssub">{pace.status === 'over' ? (pace.deltaPct > 0 ? 'ahead >10%' : 'behind >10%') : pace.status === 'warn' ? (pace.deltaPct > 0 ? 'slightly ahead' : 'slightly behind') : 'on track ±5%'}</div></div>
       </div>
@@ -583,7 +613,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                         <td><span className={`pill ${sp.status}`}>{fmtPct(sp.deltaPct)}</span></td>
                         <td>{fmt(s.spend)}</td>
                         <td>{fmt(s.monthly)}</td>
-                        <td>{fmt(sp.dailyCurrent)}</td>
+                        <td>{fmt(s.currentDaily)}</td>
                         <td className="seg-rec">{fmt(sp.dailyRec)}</td>
                         <td style={{ paddingRight: 16, textAlign: 'right' }}>
                           <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, segmentOf: account.account_name })}>Apply</button>
@@ -600,6 +630,29 @@ export default function AccountDashboard({ onPacingComplete }) {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="bb-card" style={{ marginTop: 14 }}>
+        <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Live Campaigns</div>
+        <table className="bb-table">
+          <thead><tr><th>Campaign</th><th>Segment</th><th>Status</th><th>Current Daily</th><th>Share</th><th>MTD Spend</th></tr></thead>
+          <tbody>
+            {campaigns.map(c => {
+              const cd = currentDaily(c);
+              const share = currentDailyTotal > 0 ? (cd / currentDailyTotal) * 100 : 0;
+              return (
+                <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
+                  <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
+                  <td>{c.budget_label || 'Primary'}</td>
+                  <td>{c.is_active ? 'Live' : 'Inactive w/ spend'}</td>
+                  <td>{fmt(cd)}</td>
+                  <td>{share.toFixed(1)}%</td>
+                  <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
       {/* Raw recommendations table (kept for completeness) */}

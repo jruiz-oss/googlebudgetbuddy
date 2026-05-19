@@ -57,15 +57,18 @@ def latest_pacing_date(campaigns):
 
 
 def visible_latest_campaigns(campaigns):
-    """Campaigns visible to dashboards: latest run only, deduped by Google ID."""
+    """Campaigns visible to dashboards: live campaigns plus latest-run spenders.
+
+    Live $0 campaigns should still be visible on account dashboards so their
+    current daily budgets and segment membership can be inspected. Inactive
+    campaigns remain visible only when the latest pacing run shows MTD spend.
+    """
     canonical = canonical_campaigns(campaigns)
     latest_date = latest_pacing_date(canonical)
-    if not latest_date:
-        return []
     visible = []
     for campaign in canonical:
-        latest = _campaign_latest_pacing(campaign, latest_date)
-        if latest and (latest.actual_spend or 0) > 0:
+        latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
+        if campaign.is_active or (latest and (latest.actual_spend or 0) > 0):
             visible.append(campaign)
     return visible
 
@@ -240,6 +243,7 @@ class Campaign(db.Model):
     # Google Ads budget resource name, e.g. 'customers/123/campaignBudgets/456'
     # Needed to update the budget via the API.
     budget_resource_name = db.Column(db.String(500), nullable=True)
+    current_daily_budget = db.Column(db.Float, nullable=True)
     # Segment tracking — mirrors the Google Ads script's campaignFilter concept
     budget_label = db.Column(db.String(100), nullable=True)    # e.g. "IndyCar", "Brand", "Primary"
     campaign_filter = db.Column(db.String(100), nullable=True) # keyword that assigns campaigns to this segment
@@ -303,6 +307,7 @@ class Campaign(db.Model):
             'flight_status': self.flight_status,
             'is_active': self.is_active,
             'budget_resource_name': self.budget_resource_name,
+            'current_daily_budget': round(self.current_daily_budget, 2) if self.current_daily_budget is not None else None,
             'budget_label': self.budget_label,
             'campaign_filter': self.campaign_filter,
             'created_at': self.created_at.isoformat(),

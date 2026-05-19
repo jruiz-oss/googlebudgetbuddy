@@ -20,11 +20,9 @@ campaigns_bp = Blueprint('campaigns', __name__, url_prefix='/api/campaigns')
 def get_campaigns(account_id):
     """Return campaigns for an account that should be visible in the dashboard.
 
-    Includes:
-      - is_active=True  (ENABLED + not expired — set during sync)
-      - is_active=False but has spend > 0 this month (paused/ended mid-month)
-
-    Dead campaigns (inactive, $0 spend this month) are excluded.
+    Includes canonical live campaigns even at $0 MTD spend so current daily
+    budgets/segment membership are visible, plus inactive campaigns that spent
+    in the latest pacing run.
     """
     Account.query.get_or_404(account_id)
     all_campaigns = (

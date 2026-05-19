@@ -153,6 +153,7 @@ The following columns were added in May 2026. They do NOT exist in older DB depl
 -- Campaign segment tracking
 ALTER TABLE campaigns ADD COLUMN budget_label VARCHAR(100);
 ALTER TABLE campaigns ADD COLUMN campaign_filter VARCHAR(100);
+ALTER TABLE campaigns ADD COLUMN current_daily_budget FLOAT;
 
 -- Performance metrics on pacing snapshots
 ALTER TABLE pacing_data ADD COLUMN clicks INTEGER;
@@ -171,6 +172,17 @@ On fresh deployments these are created automatically by `db.create_all()`.
 ---
 
 ## Change log
+
+### 2026-05-19 — Preserve campaign budget ratios on apply
+**What:** Applying recommended daily budgets now preserves each campaign's current share of the account/segment daily budget instead of splitting evenly.
+**Why:** If a segment's campaigns are currently weighted 30% / 70%, the new recommended total should keep that weighting rather than forcing a 50% / 50% split.
+**Changes:**
+- `backend/database.py`: Added `Campaign.current_daily_budget` and dashboard visibility now includes all live campaigns, even if they have $0 MTD spend, while still deduping by `google_campaign_id`.
+- `backend/google_ads_client.py`: MTD spend fetch now also returns campaign budget amount/resource metadata when Google Ads includes it.
+- `backend/routes/accounts.py`: Campaign import/MCC sync stores the live Google Ads daily budget on each campaign.
+- `backend/routes/pacing.py`: Pacing includes all live canonical campaigns for recommendation allocation, updates stored current daily budgets when available, and allocates `recommended_daily_budget` by current daily-budget ratio with an equal-split fallback only when all current budgets are zero.
+- `frontend/src/pages/AccountDashboard.jsx`: Account dashboard now shows live campaigns with segment, status, current daily budget, budget share, and MTD spend. Segment/account apply fallbacks also preserve current daily-budget ratios.
+- `frontend/src/pages/Home.jsx`: Home-page apply fallback preserves current daily-budget ratios instead of equal-splitting.
 
 ### 2026-05-19 — Canonical MTD spend source of truth
 **What:** Made the current Google Ads API pull the source of truth for each pacing run and blocked stale/duplicate DB rows from re-entering MTD totals.

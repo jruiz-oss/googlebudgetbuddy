@@ -20,6 +20,7 @@ from database import (  # noqa: E402
     visible_latest_campaigns,
 )
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
+from routes.pacing import _allocated_recommendation  # noqa: E402
 from routes.sheets import write_google_ads_spend_for_account  # noqa: E402
 
 
@@ -73,12 +74,21 @@ class SpendAccuracyTest(unittest.TestCase):
         stale = date(2026, 5, 18)
         current = Campaign(id=1, campaign_name='Current', google_campaign_id='1', is_active=True)
         current.pacing_data = [PacingData(date=latest, actual_spend=100)]
-        old = Campaign(id=2, campaign_name='Old', google_campaign_id='2', is_active=True)
+        old = Campaign(id=2, campaign_name='Old', google_campaign_id='2', is_active=False)
         old.pacing_data = [PacingData(date=stale, actual_spend=1600)]
 
         result = visible_latest_campaigns([current, old])
 
         self.assertEqual([c.google_campaign_id for c in result], ['1'])
+
+    def test_visible_latest_campaigns_includes_live_zero_spend_campaigns(self):
+        live_zero = Campaign(id=1, campaign_name='Live Zero', google_campaign_id='1', is_active=True)
+        spent = Campaign(id=2, campaign_name='Spent', google_campaign_id='2', is_active=True)
+        spent.pacing_data = [PacingData(date=date(2026, 5, 19), actual_spend=100)]
+
+        result = visible_latest_campaigns([live_zero, spent])
+
+        self.assertEqual([c.google_campaign_id for c in result], ['1', '2'])
 
     def test_visible_latest_campaigns_ignores_noncanonical_duplicate_dates(self):
         latest = date(2026, 5, 19)
@@ -113,6 +123,11 @@ class SpendAccuracyTest(unittest.TestCase):
         self.assertEqual(deleted, 1)
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0].date, yesterday)
+
+    def test_recommendation_allocation_preserves_current_daily_ratio(self):
+        self.assertEqual(_allocated_recommendation(300, 30, 100, 2), 90)
+        self.assertEqual(_allocated_recommendation(300, 70, 100, 2), 210)
+        self.assertEqual(_allocated_recommendation(300, 0, 0, 2), 150)
 
     def test_sheet_writeback_uses_current_run_totals_and_manual_rejects_stale_rows(self):
         account = Account(user_id=1, account_name='Goodwill AZ - Retail Grant', google_customer_id='3525872801')

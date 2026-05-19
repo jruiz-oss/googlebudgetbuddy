@@ -35,6 +35,9 @@ function fmtPct(n) {
   if (n == null || isNaN(n)) return '0.0%';
   return (n > 0 ? '+' : '') + n.toFixed(1) + '%';
 }
+function currentDaily(c) {
+  return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
+}
 
 function getSegments(account) {
   const campaigns = account.campaigns || [];
@@ -486,19 +489,21 @@ export default function Home({ onAccountsChange, accounts: propAccounts }) {
     const { daysIn, daysInMonth } = getDaysInfo();
     const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
 
-    // Build one adjustment per campaign, splitting dailyRec evenly across the segment.
-    // Each campaign in a segment shares the segment's monthly budget, so each gets an
-    // equal slice of the recommended daily rate.
+    // Build one adjustment per campaign, preserving each campaign's current
+    // daily-budget share instead of forcing an even split.
     const eligible = (item.campaigns || []).filter(c => c.budget_resource_name);
     if (!eligible.length) {
       toast.warn('No campaigns have a budget resource name yet — run pacing first to populate them.');
       return;
     }
+    const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
     const perCampaign = Math.round((pace.dailyRec / eligible.length) * 100) / 100;
     const adjustments = eligible.map(c => ({
       campaign_id:          c.id,
       budget_resource_name: c.budget_resource_name,
-      new_daily_budget:     perCampaign,
+      new_daily_budget:     totalCurrent > 0
+        ? Math.round((pace.dailyRec * (currentDaily(c) / totalCurrent)) * 100) / 100
+        : perCampaign,
     }));
 
     toast.info(`Pushing ${eligible.length} budget(s) to Google Ads…`);
