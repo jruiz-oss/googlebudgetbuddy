@@ -347,6 +347,10 @@ class Campaign(db.Model):
     # Needed to update the budget via the API.
     budget_resource_name = db.Column(db.String(500), nullable=True)
     current_daily_budget = db.Column(db.Float, nullable=True)
+    # Raw Google Ads campaign status string: 'ENABLED', 'PAUSED', 'REMOVED', etc.
+    # Stored so the frontend can show the real status while still including paused
+    # campaigns with MTD spend in pacing calculations.
+    google_status = db.Column(db.String(50), nullable=True)
     # Google Ads campaign end_date — stored so we can detect campaigns that ended before
     # the current month without re-querying the API. NULL means no end date (always-on).
     google_end_date = db.Column(db.Date, nullable=True)
@@ -422,6 +426,7 @@ class Campaign(db.Model):
             'flight_end_date': self.flight_end_date.isoformat() if self.flight_end_date else None,
             'flight_status': self.flight_status,
             'is_active': self.is_active,
+            'google_status': self.google_status,
             'google_end_date': self.google_end_date.isoformat() if self.google_end_date else None,
             'budget_resource_name': self.budget_resource_name,
             'current_daily_budget': round(self.current_daily_budget, 2) if self.current_daily_budget is not None else None,

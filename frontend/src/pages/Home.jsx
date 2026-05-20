@@ -648,9 +648,10 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
 
     // Build one adjustment per campaign, preserving each campaign's current
     // daily-budget share instead of forcing an even split.
-    const eligible = uniqueCampaigns(item.campaigns || []).filter(c => c.budget_resource_name);
+    // Only push to ENABLED campaigns — paused ones won't spend the budget.
+    const eligible = uniqueCampaigns(item.campaigns || []).filter(c => c.budget_resource_name && c.is_active);
     if (!eligible.length) {
-      toast.warn('No campaigns have a budget resource name yet — run pacing first to populate them.');
+      toast.warn('No active campaigns have a budget resource name yet — run pacing first to populate them.');
       return;
     }
     const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);

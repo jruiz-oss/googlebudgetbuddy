@@ -84,6 +84,9 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         google_campaign_id=cid,
     ).all()
 
+    # Raw status string from Google Ads: 'ENABLED', 'PAUSED', 'REMOVED', etc.
+    google_status = (live_campaign.get('status') or '').upper() or None
+
     if existing_rows:
         campaign = canonical_campaigns(existing_rows)[0]
         campaign.campaign_name = live_campaign['campaign_name']
@@ -91,6 +94,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         campaign.current_daily_budget = live_campaign.get('daily_budget_usd')
         campaign.is_active = is_live
         campaign.google_end_date = google_end_date
+        campaign.google_status = google_status
 
         # Keep duplicate rows for historical integrity, but make sure they can no
         # longer look like independently active campaigns in live calculations.
@@ -108,6 +112,7 @@ def _upsert_campaign_from_live(account_id, live_campaign):
         current_daily_budget=live_campaign.get('daily_budget_usd'),
         is_active=is_live,
         google_end_date=google_end_date,
+        google_status=google_status,
     )
     db.session.add(campaign)
     return campaign, True

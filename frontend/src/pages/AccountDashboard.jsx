@@ -48,7 +48,8 @@ function uniqueCampaigns(campaigns) {
 }
 
 function allocateByCurrentShare(campaigns, totalDaily) {
-  const eligible = uniqueCampaigns(campaigns).filter(c => c.budget_resource_name);
+  // Only push budget to ENABLED (actually running) campaigns — paused ones won't spend.
+  const eligible = uniqueCampaigns(campaigns).filter(c => c.budget_resource_name && c.is_active);
   if (!eligible.length) return [];
   const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
   const even = Math.round((totalDaily / eligible.length) * 100) / 100;
@@ -417,6 +418,16 @@ export default function AccountDashboard({ onPacingComplete }) {
       if (r.data.auto_pause_warning) toast.warn(r.data.auto_pause_warning.message);
       toast.success('Pacing run complete');
       onPacingComplete?.();
+      // Silently reload the campaign list so visible_latest_campaigns re-runs with
+      // today as the new latest_date. Before the first pacing run of the day,
+      // latest_date was a prior date — any campaign that spent on that date appeared
+      // visible even if it ended last month. Now that today's run is committed the
+      // backend will exclude those zombies. No loading spinner needed: mergeRecs
+      // already applied the fresh spend/rec numbers.
+      try {
+        const campR = await axios.get(`/api/campaigns/account/${id}`);
+        setCampaigns(campR.data.campaigns || []);
+      } catch { /* best-effort — mergeRecs data is still shown if this fails */ }
     } catch (e) { toast.error(e.response?.data?.error || 'Pacing run failed'); }
     finally { setRunning(false); }
   };
@@ -494,11 +505,12 @@ export default function AccountDashboard({ onPacingComplete }) {
         const segLabel = item.segmentOf ? item.name : null;
         const eligible = uniqueCampaigns(campaigns).filter(c =>
           c.budget_resource_name &&
+          c.is_active &&  // only push budget to ENABLED campaigns — paused ones won't spend
           (segLabel === null || (c.budget_label || 'Primary') === segLabel)
         );
 
         if (!eligible.length) {
-          toast.warn('No campaigns have a budget resource name — run pacing first to populate them.');
+          toast.warn('No active campaigns have a budget resource name — run pacing first to populate them.');
           return;
         }
 
@@ -766,7 +778,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                 <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
                   <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
                   <td>{c.budget_label || 'Primary'}</td>
-                  <td>{c.is_active ? 'Live' : 'Inactive w/ spend'}</td>
+                  <td>{c.is_active ? 'Live' : (c.google_status === 'PAUSED' ? 'Paused' : 'Inactive w/ spend')}</td>
                   <td>{fmt(cd)}</td>
                   <td>{share.toFixed(1)}%</td>
                   <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>

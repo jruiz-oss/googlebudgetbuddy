@@ -418,11 +418,16 @@ def run_pacing(account_id):
         if _c.google_campaign_id not in _counted_gids:
             _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
             seg_spend_map[_label] += _cspend
-            seg_count_map[_label] += 1   # count unique campaigns, not DB rows
+            # seg_count_map is used for the equal-split fallback in _allocated_recommendation.
+            # Only count ENABLED (is_active) campaigns — paused campaigns that spent earlier
+            # this month are included for spend tracking but should NOT receive a new budget,
+            # so they must not inflate the divisor used to split the recommendation.
+            if _c.is_active:
+                seg_count_map[_label] += 1
             _counted_gids.add(_c.google_campaign_id)
             logger.info(
-                "Run pacing spend item: account_id=%s gid=%s name=%r label=%r spend=%.2f",
-                account.id, _c.google_campaign_id, _c.campaign_name, _label, _cspend,
+                "Run pacing spend item: account_id=%s gid=%s name=%r label=%r spend=%.2f is_active=%s",
+                account.id, _c.google_campaign_id, _c.campaign_name, _label, _cspend, _c.is_active,
             )
 
         seg_daily_map[_label]  += _cdaily
@@ -1000,7 +1005,10 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         if _c.google_campaign_id not in _counted_gids:
             _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
             seg_spend_map[_label] += _cspend
-            seg_count_map[_label] += 1   # count unique campaigns, not DB rows
+            # Only count ENABLED (is_active) campaigns in the equal-split fallback divisor.
+            # Paused campaigns contribute spend but should not receive new budget allocations.
+            if _c.is_active:
+                seg_count_map[_label] += 1
             _counted_gids.add(_c.google_campaign_id)
 
         seg_daily_map[_label]  += _cdaily
