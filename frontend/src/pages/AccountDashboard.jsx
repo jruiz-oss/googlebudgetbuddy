@@ -782,25 +782,83 @@ export default function AccountDashboard({ onPacingComplete }) {
 
       <div className="bb-card" style={{ marginTop: 14 }}>
         <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Live Campaigns</div>
-        <table className="bb-table">
-          <thead><tr><th>Campaign</th><th>Segment</th><th>Status</th><th>Current Daily</th><th>Share</th><th>MTD Spend</th></tr></thead>
-          <tbody>
-            {uniqueCampaigns(campaigns).map(c => {
-              const cd = currentDaily(c);
-              const share = currentDailyTotal > 0 ? (cd / currentDailyTotal) * 100 : 0;
-              return (
-                <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
-                  <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
-                  <td>{c.budget_label || 'Primary'}</td>
-                  <td>{statusLabel(c)}</td>
-                  <td>{fmt(cd)}</td>
-                  <td>{share.toFixed(1)}%</td>
-                  <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>
+        {isSegmented ? (() => {
+          // Group campaigns by segment label, preserving segment order from the segments array.
+          const segOrder = segments.map(s => s.name);
+          const grouped = {};
+          for (const c of uniqueCampaigns(campaigns)) {
+            const label = c.budget_label || 'Primary';
+            if (!grouped[label]) grouped[label] = [];
+            grouped[label].push(c);
+          }
+          // Include any labels not in segments (shouldn't happen, but defensive).
+          const allLabels = [...new Set([...segOrder, ...Object.keys(grouped)])];
+          return (
+            <table className="bb-table">
+              <thead>
+                <tr>
+                  <th>Campaign</th><th>Status</th><th>Current Daily</th><th>Share</th><th>MTD Spend</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {allLabels.map(label => {
+                  const seg = segments.find(s => s.name === label);
+                  const cams = grouped[label] || [];
+                  if (!cams.length) return null;
+                  // Share is within-segment so each campaign's % is relative to its segment total.
+                  const segDailyTotal = cams.reduce((s, c) => s + currentDaily(c), 0);
+                  const segPace = seg ? computePace(seg.monthly, seg.spend, daysIn, daysInMonth) : null;
+                  return [
+                    <tr key={`seg-header-${label}`} style={{ background: 'var(--surface-2, #f5f6f8)', pointerEvents: 'none' }}>
+                      <td colSpan={5} style={{ padding: '7px 12px', fontWeight: 700, fontSize: 'var(--t-sm)', color: 'var(--ink-2)', letterSpacing: '0.02em' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                          {label}
+                          {seg && segPace && (
+                            <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 'var(--t-xs)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                              {fmt(seg.spend)} MTD · {fmt(seg.monthly)} budget · <span className={`pill ${segPace.status}`}>{fmtPct(segPace.deltaPct)}</span>
+                            </span>
+                          )}
+                        </span>
+                      </td>
+                    </tr>,
+                    ...cams.map(c => {
+                      const cd = currentDaily(c);
+                      const share = segDailyTotal > 0 ? (cd / segDailyTotal) * 100 : 0;
+                      return (
+                        <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
+                          <td style={{ fontWeight: 500, paddingLeft: 24 }}>{c.campaign_name}</td>
+                          <td>{statusLabel(c)}</td>
+                          <td>{fmt(cd)}</td>
+                          <td>{share.toFixed(1)}%</td>
+                          <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>
+                        </tr>
+                      );
+                    }),
+                  ];
+                })}
+              </tbody>
+            </table>
+          );
+        })() : (
+          <table className="bb-table">
+            <thead><tr><th>Campaign</th><th>Status</th><th>Current Daily</th><th>Share</th><th>MTD Spend</th></tr></thead>
+            <tbody>
+              {uniqueCampaigns(campaigns).map(c => {
+                const cd = currentDaily(c);
+                const share = currentDailyTotal > 0 ? (cd / currentDailyTotal) * 100 : 0;
+                return (
+                  <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
+                    <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
+                    <td>{statusLabel(c)}</td>
+                    <td>{fmt(cd)}</td>
+                    <td>{share.toFixed(1)}%</td>
+                    <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {/* Raw recommendations table (kept for completeness) */}
