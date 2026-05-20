@@ -312,7 +312,6 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
         SELECT
           campaign.id,
           campaign.status,
-          campaign.end_date,
           campaign.advertising_channel_type,
           campaign_budget.amount_micros,
           campaign_budget.resource_name,
