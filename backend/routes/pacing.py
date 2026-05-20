@@ -31,7 +31,8 @@ from sqlalchemy.orm import selectinload
 from database import (
     Account, AccountSettings, BudgetAdjustment, Campaign,
     GoogleOAuthToken, PacingData, PacingRun, PauseEvent, db,
-    campaign_identity_key, canonical_campaigns, visible_latest_campaigns,
+    campaign_identity_key, canonical_campaigns, dedupe_by_name,
+    visible_latest_campaigns,
 )
 from google_ads_client import (
     GoogleAdsError, get_campaign_mtd_spend, get_campaign_daily_spend,
@@ -269,8 +270,12 @@ def _campaigns_for_pacing(account, today, metrics_by_id):
     live_campaigns so they don't inflate segment counts or distort budget ratios.
     Inactive campaigns (paused / ended in sync) are included only if they spent
     this month — those are shown on the dashboard with their real status.
+
+    Also collapses same-name twins from legacy duplicate-gid imports so the
+    pacing run doesn't write PacingData for the phantom row alongside the real
+    one.
     """
-    campaigns = canonical_campaigns(account.campaigns)
+    campaigns = dedupe_by_name(canonical_campaigns(account.campaigns))
     live_campaigns = [
         c for c in campaigns
         if c.is_active

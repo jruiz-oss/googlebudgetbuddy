@@ -63,6 +63,39 @@ def latest_pacing_date(campaigns):
     return latest
 
 
+def _normalize_campaign_name(name):
+    """Loose normalization so 'Foo | Search' and 'foo  |  search' collide."""
+    return ' '.join((name or '').lower().split())
+
+
+def dedupe_by_name(campaigns):
+    """Collapse same-name twins within an account to a single row.
+
+    Why we need this:
+      Google Ads campaigns are unique by gid, but legacy imports left some
+      accounts with TWO DB rows for one logical Google campaign (different
+      gids, same name). Only one row gets refreshed by the live API each
+      run — the other keeps stale status/budget and looks like a phantom
+      "Live" twin next to the real (paused) row.
+
+    Picks the twin most recently touched by a pacing run, then the one with
+    a google_status set (means the API refresh saw it this run), then the
+    most recently created row.
+    """
+    by_name = {}
+    for c in campaigns or []:
+        key = (c.account_id, _normalize_campaign_name(c.campaign_name))
+        by_name.setdefault(key, []).append(c)
+
+    def _freshness_score(c):
+        latest = _campaign_latest_date(c) or date.min
+        has_status = 1 if c.google_status else 0
+        created    = c.created_at or datetime.min
+        return (latest, has_status, created, c.id or 0)
+
+    return [max(twins, key=_freshness_score) for twins in by_name.values()]
+
+
 def visible_latest_campaigns(campaigns):
     """Campaigns visible to dashboards. Mirrors the pacing-run inclusion rule.
 
@@ -77,11 +110,17 @@ def visible_latest_campaigns(campaigns):
           end_date and with $0 spend this month.
         • Campaigns with prior pacing history but $0 in the latest run
           (stale/dead, regardless of is_active flag).
+        • A paused/ended row that shares a name (within the same account) with
+          an ENABLED row — Google Ads sometimes splits one logical campaign
+          across two gids when it's deleted-and-recreated. Without this pass
+          the dashboard shows the same campaign twice.
     """
     from datetime import date as _date
     canonical = canonical_campaigns(campaigns)
     latest_date = latest_pacing_date(canonical)
     today = _date.today()
+
+    # First pass: standard inclusion rule.
     visible = []
     for campaign in canonical:
         latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
@@ -107,7 +146,9 @@ def visible_latest_campaigns(campaigns):
             continue
 
         visible.append(campaign)
-    return visible
+
+    # Second pass: collapse same-name twins (legacy duplicate-gid rows).
+    return dedupe_by_name(visible)
 
 
 def segment_budget_total(campaigns):

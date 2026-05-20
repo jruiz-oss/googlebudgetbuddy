@@ -425,6 +425,50 @@ class SpendAccuracyTest(unittest.TestCase):
         self.assertEqual(c.google_status, 'PAUSED')
         self.assertFalse(c.is_active)
 
+    def test_visible_latest_campaigns_dedupes_same_name_legacy_twins(self):
+        """One Google Ads campaign that's been imported under two gids should
+        appear ONCE on the dashboard — the freshly-refreshed row wins."""
+        from database import dedupe_by_name
+        today = date.today()
+
+        # Twin A: stale duplicate, still has is_active=True from a prior sync.
+        # Never got refreshed by the latest pacing run (no google_status).
+        stale = Campaign(
+            id=1,
+            account_id=10,
+            campaign_name='Commit | Secondary Geo | Search',
+            google_campaign_id='1111',
+            is_active=True,
+            current_daily_budget=200,
+            google_status=None,
+            created_at=datetime(2026, 1, 1),
+        )
+        stale.pacing_data = [
+            PacingData(date=today - timedelta(days=1), actual_spend=4, expected_spend=0, pace_ratio=0),
+        ]
+
+        # Twin B: real Google campaign — user paused it in Google Ads. Refreshed
+        # by the latest pacing run so it has today's pacing row + google_status.
+        real = Campaign(
+            id=2,
+            account_id=10,
+            campaign_name='Commit | Secondary Geo | Search',
+            google_campaign_id='2222',
+            is_active=False,
+            current_daily_budget=0,
+            google_status='PAUSED',
+            created_at=datetime(2026, 5, 19),
+        )
+        real.pacing_data = [
+            PacingData(date=today, actual_spend=4, expected_spend=0, pace_ratio=0),
+        ]
+
+        # dedupe_by_name picks the row with the freshest pacing date.
+        result = dedupe_by_name([stale, real])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].id, 2)
+        self.assertEqual(result[0].google_status, 'PAUSED')
+
     def test_refresh_campaign_state_stores_end_date_from_api(self):
         c = Campaign(
             campaign_name='Ends this month',
