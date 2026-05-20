@@ -42,7 +42,11 @@ function uniqueCampaigns(campaigns) {
   for (const c of campaigns || []) {
     const key = campaignKey(c);
     const prev = byKey.get(key);
-    if (!prev || (!prev.budget_resource_name && c.budget_resource_name)) byKey.set(key, c);
+    // Prefer: active over inactive, then having a budget_resource_name over not.
+    if (!prev) { byKey.set(key, c); continue; }
+    const prevScore = (prev.is_active ? 2 : 0) + (prev.budget_resource_name ? 1 : 0);
+    const cScore    = (c.is_active    ? 2 : 0) + (c.budget_resource_name    ? 1 : 0);
+    if (cScore > prevScore) byKey.set(key, c);
   }
   return [...byKey.values()];
 }
@@ -771,7 +775,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <table className="bb-table">
           <thead><tr><th>Campaign</th><th>Segment</th><th>Status</th><th>Current Daily</th><th>Share</th><th>MTD Spend</th></tr></thead>
           <tbody>
-            {campaigns.map(c => {
+            {uniqueCampaigns(campaigns).map(c => {
               const cd = currentDaily(c);
               const share = currentDailyTotal > 0 ? (cd / currentDailyTotal) * 100 : 0;
               return (
