@@ -7,6 +7,7 @@ Start order:
   3. Register all blueprints
   4. Create tables on first boot (db.create_all)
   5. Start APScheduler for daily pacing (prod only)
+  6. Run startup DB migrations for additive columns
 
 Environment variables required in production (set on Railway):
   DATABASE_URL           — Neon PostgreSQL connection string
