@@ -1,5 +1,6 @@
 """
 Google BudgetBuddy — Flask application entry point.
+(redeploy trigger: 2026-05-20)
 
 Start order:
   1. Create Flask app and configure from env vars
