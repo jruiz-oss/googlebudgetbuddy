@@ -197,6 +197,24 @@ class SpendAccuracyTest(unittest.TestCase):
         self.assertEqual(_allocated_recommendation(300, 70, 100, 2), 210)
         self.assertEqual(_allocated_recommendation(300, 0, 0, 2), 150)
 
+    def test_apply_skips_paused_campaign_in_segment(self):
+        """When a segment has one ENABLED campaign + one PAUSED campaign that
+        spent earlier this month, the full segment recommendation goes to the
+        ENABLED one. Paused gets $0 because its current_daily is $0."""
+        seg_rec    = 145    # what segment should spend per day
+        active_cd  = 145    # active campaign's current daily
+        paused_cd  = 0      # paused — _current_daily_for_run returns 0
+        seg_daily  = active_cd + paused_cd
+
+        self.assertEqual(
+            _allocated_recommendation(seg_rec, active_cd, seg_daily, seg_count=2),
+            145,
+        )
+        self.assertEqual(
+            _allocated_recommendation(seg_rec, paused_cd, seg_daily, seg_count=2),
+            0,
+        )
+
     def test_pace_ratio_matches_sheet_budget_used_percent(self):
         recommended, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
             monthly_budget=1000,
@@ -424,6 +442,73 @@ class SpendAccuracyTest(unittest.TestCase):
         _refresh_campaign_state_from_api([c], metrics_by_id)
         self.assertEqual(c.google_status, 'PAUSED')
         self.assertFalse(c.is_active)
+
+    def test_refresh_flags_unrecognized_same_name_twin_as_removed(self):
+        """If the API doesn't recognize a campaign's gid but a same-name campaign
+        IS recognized, the unrecognized one is flagged REMOVED so dedup picks
+        the real row."""
+        phantom = Campaign(
+            id=1,
+            account_id=10,
+            campaign_name='Commit | Secondary Geo | Search',
+            google_campaign_id='1111',          # not in metrics_by_id
+            is_active=True,                     # stale
+            current_daily_budget=200,
+            google_status='ENABLED',
+        )
+        real = Campaign(
+            id=2,
+            account_id=10,
+            campaign_name='Commit | Secondary Geo | Search',
+            google_campaign_id='2222',          # IS in metrics_by_id
+            is_active=True,
+            current_daily_budget=200,
+            google_status='ENABLED',
+        )
+        metrics_by_id = {
+            '2222': {'status': 'PAUSED', 'spend': 4, 'daily_budget_usd': 0},
+        }
+        _refresh_campaign_state_from_api([phantom, real], metrics_by_id)
+
+        # Phantom flagged REMOVED so dedup will never prefer it again.
+        self.assertEqual(phantom.google_status, 'REMOVED')
+        self.assertFalse(phantom.is_active)
+        self.assertEqual(phantom.current_daily_budget, 0)
+
+        # Real campaign got the API status.
+        self.assertEqual(real.google_status, 'PAUSED')
+        self.assertFalse(real.is_active)
+
+    def test_dedupe_by_name_prefers_non_removed_phantom(self):
+        """Even if the phantom has more recent pacing history, dedup must pick
+        the real row because the phantom is now flagged REMOVED."""
+        from database import dedupe_by_name
+        today = date.today()
+        phantom = Campaign(
+            id=1, account_id=10,
+            campaign_name='Secondary Geo',
+            google_campaign_id='1111',
+            google_status='REMOVED',
+            created_at=datetime(2026, 1, 1),
+        )
+        phantom.pacing_data = [
+            PacingData(date=today, actual_spend=0, expected_spend=0, pace_ratio=0),
+        ]
+        real = Campaign(
+            id=2, account_id=10,
+            campaign_name='Secondary Geo',
+            google_campaign_id='2222',
+            google_status='PAUSED',
+            created_at=datetime(2026, 5, 19),
+        )
+        real.pacing_data = [
+            PacingData(date=today - timedelta(days=1), actual_spend=4, expected_spend=0, pace_ratio=0),
+        ]
+
+        result = dedupe_by_name([phantom, real])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].id, 2)
+        self.assertEqual(result[0].google_status, 'PAUSED')
 
     def test_visible_latest_campaigns_dedupes_same_name_legacy_twins(self):
         """One Google Ads campaign that's been imported under two gids should

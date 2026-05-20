@@ -78,9 +78,12 @@ def dedupe_by_name(campaigns):
       run — the other keeps stale status/budget and looks like a phantom
       "Live" twin next to the real (paused) row.
 
-    Picks the twin most recently touched by a pacing run, then the one with
-    a google_status set (means the API refresh saw it this run), then the
-    most recently created row.
+    Pick order (highest priority first):
+      1. NOT flagged as REMOVED — phantoms get marked REMOVED at pacing time
+         when the API doesn't recognize their gid.
+      2. Most recently touched by a pacing run (latest_pacing date).
+      3. Has google_status set (means the API saw it at some point).
+      4. Most recently created.
     """
     by_name = {}
     for c in campaigns or []:
@@ -88,10 +91,11 @@ def dedupe_by_name(campaigns):
         by_name.setdefault(key, []).append(c)
 
     def _freshness_score(c):
-        latest = _campaign_latest_date(c) or date.min
-        has_status = 1 if c.google_status else 0
-        created    = c.created_at or datetime.min
-        return (latest, has_status, created, c.id or 0)
+        not_phantom = 0 if (c.google_status or '').upper() == 'REMOVED' else 1
+        latest      = _campaign_latest_date(c) or date.min
+        has_status  = 1 if c.google_status else 0
+        created     = c.created_at or datetime.min
+        return (not_phantom, latest, has_status, created, c.id or 0)
 
     return [max(twins, key=_freshness_score) for twins in by_name.values()]
 

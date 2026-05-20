@@ -237,16 +237,43 @@ def _is_zombie_campaign(campaign, today, api_spend):
     return False
 
 
+def _norm_name(name):
+    return ' '.join((name or '').lower().split())
+
+
 def _refresh_campaign_state_from_api(db_campaigns, metrics_by_id):
     """Sync live Google Ads state (status, end_date, daily budget, budget RN)
     onto canonical DB campaigns before the include/exclude filter runs.
+
+    Also flags legacy "phantom" rows: a DB campaign whose gid is NOT recognized
+    by the Google Ads API but which shares a name with a campaign that IS
+    recognized. These come from pre-uniqueness-constraint imports where one
+    Google campaign got stored under two gids. We force the phantom to
+    is_active=False so it can never out-rank the real row in the name-based
+    dedup that runs next.
 
     Without this, a campaign the user just paused in Google Ads still shows
     is_active=True from the last sync, slips into the "live" bucket, and the
     Status pill incorrectly says "Live" instead of "Paused".
     """
+    recognized_names = {
+        _norm_name(c.campaign_name)
+        for c in db_campaigns
+        if c.google_campaign_id in metrics_by_id
+    }
+
     for c in db_campaigns:
         m = metrics_by_id.get(c.google_campaign_id, {}) or {}
+        is_recognized = bool(m)
+
+        # Phantom: API doesn't know this gid, but a same-name campaign IS in
+        # the API response. Force it inactive so dedup picks the real row.
+        if not is_recognized and _norm_name(c.campaign_name) in recognized_names:
+            c.is_active = False
+            c.google_status = 'REMOVED'
+            c.current_daily_budget = 0
+            continue
+
         api_status = (m.get('status') or '').upper() or None
         if api_status:
             c.google_status = api_status
