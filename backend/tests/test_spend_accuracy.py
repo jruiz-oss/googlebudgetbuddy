@@ -23,6 +23,7 @@ from database import (  # noqa: E402
 )
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
 from routes.pacing import _allocated_recommendation, _compute_recommendation, _segment_summaries_from_maps  # noqa: E402
+from routes.pacing import _campaigns_for_pacing, _execute_pacing_run, _is_zombie_campaign  # noqa: E402
 from routes.sheets import _google_ads_row_assignments, write_google_ads_spend_for_account  # noqa: E402
 
 
@@ -260,6 +261,157 @@ class SpendAccuracyTest(unittest.TestCase):
             [{'range': 'D16', 'values': [[6021.08]]}],
             value_input_option='USER_ENTERED',
         )
+
+
+    # -----------------------------------------------------------------
+    # Consolidation regressions: same core powers both per-account /run
+    # and the background run_pacing_for_account, so behavior must match.
+    # -----------------------------------------------------------------
+
+    def _setup_account_with_campaigns(self, campaign_specs):
+        """Build an Account + Campaigns in a real (in-memory) session.
+
+        campaign_specs: list of dicts with keys:
+          name, gid, is_active, budget, end_date (optional), prior_spend (optional)
+        """
+        account = Account(
+            user_id=1,
+            account_name='Test Account',
+            google_customer_id='1234567890',
+        )
+        db.session.add(account)
+        db.session.flush()
+        db.session.add(AccountSettings(account_id=account.id))
+        db.session.flush()
+
+        for spec in campaign_specs:
+            c = Campaign(
+                account_id=account.id,
+                campaign_name=spec['name'],
+                google_campaign_id=spec['gid'],
+                is_active=spec.get('is_active', True),
+                monthly_budget=spec.get('budget', 1000),
+                budget_label=spec.get('label', 'Primary'),
+                budget_resource_name=f"customers/1234567890/campaignBudgets/{spec['gid']}",
+                google_end_date=spec.get('end_date'),
+                flight_type='ALWAYS_ON',
+            )
+            db.session.add(c)
+            db.session.flush()
+            if spec.get('prior_spend'):
+                db.session.add(PacingData(
+                    campaign_id=c.id,
+                    date=date.today() - timedelta(days=2),
+                    actual_spend=spec['prior_spend'],
+                    expected_spend=0,
+                    pace_ratio=spec['prior_spend'] / (spec.get('budget', 1000) or 1),
+                ))
+        db.session.commit()
+
+        from sqlalchemy.orm import selectinload
+        return (
+            Account.query
+            .options(selectinload(Account.campaigns).selectinload(Campaign.pacing_data))
+            .get(account.id)
+        )
+
+    def test_is_zombie_uses_today_not_month_start(self):
+        """A campaign that ended mid-month with $0 spend is a zombie."""
+        from datetime import date as _date
+        today = _date(2026, 5, 20)
+        # Ended 10 days ago this month, no spend → zombie.
+        c = Campaign(
+            campaign_name='Ended mid-month',
+            google_campaign_id='1',
+            is_active=True,
+            google_end_date=_date(2026, 5, 10),
+        )
+        self.assertTrue(_is_zombie_campaign(c, today, api_spend=0))
+        # Same campaign WITH spend → not a zombie (kept for visibility).
+        self.assertFalse(_is_zombie_campaign(c, today, api_spend=50))
+
+    def test_is_zombie_keeps_future_end_date_with_zero_spend(self):
+        """A live campaign with no spend yet should NOT be a zombie."""
+        from datetime import date as _date
+        today = _date(2026, 5, 20)
+        c = Campaign(
+            campaign_name='Live no-spend',
+            google_campaign_id='2',
+            is_active=True,
+            google_end_date=_date(2026, 12, 31),
+        )
+        # No pacing_data → brand new, never paced.
+        self.assertFalse(_is_zombie_campaign(c, today, api_spend=0))
+
+    def test_campaigns_for_pacing_excludes_ended_no_spend_includes_paused_with_spend(self):
+        """Exactly the user's two rules: zombies out, paused-with-spend in."""
+        from datetime import date as _date
+        today = _date.today()
+
+        account = self._setup_account_with_campaigns([
+            {'name': 'Live active', 'gid': '100', 'is_active': True},
+            {'name': 'Zombie ended', 'gid': '200', 'is_active': True,
+             'end_date': today - timedelta(days=5)},
+            {'name': 'Paused with spend', 'gid': '300', 'is_active': False},
+            {'name': 'Paused no spend', 'gid': '400', 'is_active': False},
+        ])
+
+        metrics_by_id = {
+            '100': {'spend': 250},                  # live, normal
+            '200': {'spend': 0},                    # ended + no spend → zombie
+            '300': {'spend': 180},                  # paused but spent this month → kept
+            '400': {'spend': 0},                    # paused + no spend → excluded
+        }
+
+        _, live, inactive, active = _campaigns_for_pacing(account, today, metrics_by_id)
+        active_gids = sorted(c.google_campaign_id for c in active)
+        live_gids   = sorted(c.google_campaign_id for c in live)
+
+        self.assertEqual(live_gids, ['100'])           # zombie filtered out
+        self.assertIn('300', active_gids)              # paused-with-spend kept
+        self.assertNotIn('200', active_gids)           # zombie excluded
+        self.assertNotIn('400', active_gids)           # paused-no-spend excluded
+
+    def test_execute_pacing_run_sequential_calls_no_double_count(self):
+        """Calling _execute_pacing_run twice (e.g. run-all loop) must NOT
+        double-count MTD spend. The same-day delete needs to clean rows from
+        the previous call within the same session."""
+        from datetime import date as _date
+        today = _date.today()
+
+        account = self._setup_account_with_campaigns([
+            {'name': 'Campaign A', 'gid': '100', 'budget': 5000, 'is_active': True},
+            {'name': 'Campaign B', 'gid': '200', 'budget': 3000, 'is_active': True},
+        ])
+
+        metrics_by_id = {
+            '100': {'spend': 1000, 'clicks': 50, 'conversions': 2},
+            '200': {'spend': 600,  'clicks': 30, 'conversions': 1},
+        }
+
+        with patch('routes.pacing.get_campaign_mtd_spend', return_value=metrics_by_id):
+            r1 = _execute_pacing_run(account, 'fake-refresh', today, log_prefix='t1')
+            db.session.commit()
+            r2 = _execute_pacing_run(account, 'fake-refresh', today, log_prefix='t2')
+            db.session.commit()
+
+        self.assertTrue(r1['ok'] and r2['ok'])
+        self.assertEqual(r1['seg_spend_map'], r2['seg_spend_map'])
+        self.assertEqual(sum(r2['seg_spend_map'].values()), 1600)  # NOT 3200
+
+        rows = PacingData.query.filter_by(date=today).all()
+        # Exactly one row per campaign for today — old same-day rows must be gone.
+        self.assertEqual(len(rows), 2)
+        gid_to_spend = {
+            row.campaign.google_campaign_id: row.actual_spend
+            for row in rows
+        }
+        self.assertEqual(gid_to_spend, {'100': 1000, '200': 600})
+
+    # NOTE: A direct DB test for duplicate-row dedup inside _execute_pacing_run
+    # isn't possible on fresh DBs anymore — the `uq_campaign_account_google_id`
+    # constraint now blocks two rows from sharing the same (account_id, gid).
+    # Helper-level dedup is covered by `test_normalized_campaign_ids_are_counted_once_in_totals`.
 
 
 if __name__ == '__main__':

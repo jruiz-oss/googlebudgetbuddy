@@ -31,7 +31,7 @@ from sqlalchemy.orm import selectinload
 from database import (
     Account, AccountSettings, BudgetAdjustment, Campaign,
     GoogleOAuthToken, PacingData, PacingRun, PauseEvent, db,
-    canonical_campaigns, visible_latest_campaigns,
+    campaign_identity_key, canonical_campaigns, visible_latest_campaigns,
 )
 from google_ads_client import (
     GoogleAdsError, get_campaign_mtd_spend, get_campaign_daily_spend,
@@ -166,13 +166,40 @@ def _segment_summaries_from_maps(seg_budget_map, seg_spend_map, seg_daily_map, s
 
 
 def _delete_today_pacing_data(campaigns, today):
-    """Remove same-day snapshots before writing the fresh API-backed run."""
-    campaign_ids = [c.id for c in campaigns if c.id]
-    if not campaign_ids:
+    """Remove same-day snapshots before writing the fresh API-backed run.
+
+    Cleans BOTH the canonical Campaign row's same-day snapshots AND any
+    duplicate DB rows that share the same google_campaign_id within the same
+    account. Without this, a stale same-day row left over on a duplicate row
+    (from a buggy prior run) could re-enter dashboard totals — which is the
+    classic "2x MTD" symptom on the home dashboard.
+    """
+    if not campaigns:
+        return 0
+
+    account_ids = {c.account_id for c in campaigns if c.account_id}
+    gids        = {c.google_campaign_id for c in campaigns if c.google_campaign_id}
+    canonical_ids = {c.id for c in campaigns if c.id}
+
+    target_ids = set(canonical_ids)
+    if account_ids and gids:
+        # Expand to every Campaign row in these accounts that shares any of
+        # the canonical google_campaign_ids — covers duplicate rows.
+        sibling_rows = (
+            Campaign.query
+            .filter(Campaign.account_id.in_(account_ids),
+                    Campaign.google_campaign_id.in_(gids))
+            .with_entities(Campaign.id)
+            .all()
+        )
+        for (sid,) in sibling_rows:
+            target_ids.add(sid)
+
+    if not target_ids:
         return 0
     deleted = (
         PacingData.query
-        .filter(PacingData.campaign_id.in_(campaign_ids), PacingData.date == today)
+        .filter(PacingData.campaign_id.in_(target_ids), PacingData.date == today)
         .delete(synchronize_session=False)
     )
     db.session.flush()
@@ -180,41 +207,42 @@ def _delete_today_pacing_data(campaigns, today):
 
 
 def _is_zombie_campaign(campaign, today, api_spend):
-    """True if this campaign ended before the current month and has no spend this month.
+    """True if this campaign is effectively dead and should be skipped.
 
     Google Ads often leaves campaigns ENABLED long after their end_date passes.
-    Without this check those campaigns pollute segment totals, count maps, and
-    budget-ratio calculations even though they are functionally dead.
-
-    Two detection paths:
-      1. google_end_date is set and < month_start AND api_spend == 0
-         (accurate — fires after a sync populates google_end_date)
-      2. Campaign has pacing history from a prior month AND api_spend == 0
-         (fallback — fires immediately on existing rows where google_end_date is NULL)
+    The user's rule (matches dashboard expectations):
+      • Any campaign with MTD spend > 0 is INCLUDED, regardless of status.
+        That covers ENABLED-with-end-date-this-month-and-spend AND paused-but-
+        spent-this-month.
+      • A campaign with $0 MTD spend is a zombie if either:
+          (1) google_end_date is populated and is before today, or
+          (2) it has prior pacing history but $0 in this MTD pull
+              (covers legacy rows where google_end_date is still NULL).
     """
     if (api_spend or 0) > 0:
-        return False  # has spend this month → never a zombie
+        return False  # has spend → not a zombie, even if paused/ended
 
-    month_start = today.replace(day=1)
+    # Path 1: end_date is in the past → zombie, regardless of is_active flag.
+    # Use `< today` (not `< month_start`) so a campaign that ended yesterday
+    # with no spend is hidden immediately rather than waiting until next month.
+    if campaign.google_end_date is not None and campaign.google_end_date < today:
+        return True
 
-    # Path 1: explicit Google Ads end_date (populated after a sync)
-    if campaign.google_end_date is not None:
-        return campaign.google_end_date < month_start
+    # Path 2: legacy fallback for rows without google_end_date populated.
+    # A campaign that has been paced before but pulls $0 today is dead.
+    if campaign.google_end_date is None and campaign.pacing_data:
+        return True
 
-    # Path 2: has ANY prior pacing data + $0 API spend this month.
-    # If the campaign has been paced before and still shows no spend,
-    # it's dead. Campaigns with no pacing data at all are brand-new and
-    # should still be included. _delete_today_pacing_data() runs after
-    # this check so any rows here are from a prior run.
-    return bool(campaign.pacing_data)
+    return False
 
 
 def _campaigns_for_pacing(account, today, metrics_by_id):
     """Return canonical live campaigns plus inactive campaigns with MTD spend.
 
-    Zombie campaigns (ended before this month, $0 API spend) are excluded from
+    Zombie campaigns (end_date < today AND $0 API spend) are excluded from
     live_campaigns so they don't inflate segment counts or distort budget ratios.
-    They are also excluded from spending_inactive since they have no spend.
+    Inactive campaigns (paused / ended in sync) are included only if they spent
+    this month — those are shown on the dashboard with their real status.
     """
     campaigns = canonical_campaigns(account.campaigns)
     live_campaigns = [
@@ -235,12 +263,281 @@ def _campaigns_for_pacing(account, today, metrics_by_id):
 
 
 # ---------------------------------------------------------------------------
+# Core pacing executor — ONE shared implementation for every entry point.
+#
+# Whether pacing is triggered by:
+#   • POST /api/pacing/<account_id>/run (per-account dashboard button),
+#   • POST /api/pacing/run-all          (home page "Run All"),
+#   • the MCC sync background job,      or
+#   • the 06:00 UTC APScheduler,
+# they ALL flow through _execute_pacing_run() below. That guarantees the
+# campaign filtering, dedup, segment math, and PacingData writes are
+# byte-identical across paths — the "fix one, break the other" treadmill
+# that produced the alternating 2x-MTD / zombie-campaign bugs was a direct
+# result of having two near-duplicate implementations drift apart.
+# ---------------------------------------------------------------------------
+
+def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
+    """Fetch MTD spend, filter zombies, compute segment maps, write PacingData.
+
+    The caller handles sheet sync (before) and sheet writeback (after), plus
+    HTTP response or PacingRun audit row construction.
+
+    Returns dict with:
+      ok               — True if the run completed; False on fatal API error.
+      no_campaigns     — True if the account has no DB campaigns at all.
+      no_active        — True if no campaigns were eligible after filtering.
+      error            — error string when ok is False.
+      recommendations  — list of per-campaign rec dicts (for the JSON route).
+      seg_*_map        — segment aggregate maps used by sheet writeback.
+      active_campaigns / live_campaigns / inactive_campaigns / metrics_by_id.
+      processed        — count of PacingData rows written.
+    """
+    from collections import defaultdict
+
+    month_start, month_end = _month_bounds(today)
+    days_in_month  = (month_end - month_start).days + 1
+    days_elapsed   = (today - month_start).days + 1
+    days_remaining = (month_end - today).days + 1
+    effective_mcc_id = _effective_mcc_customer_id(account)
+
+    db_campaigns = canonical_campaigns(account.campaigns)
+    if not db_campaigns:
+        logger.info('%s: account_id=%s has no campaigns — skipping', log_prefix, account.id)
+        return {
+            'ok': True,
+            'no_campaigns': True,
+            'no_active': True,
+            'recommendations': [],
+            'seg_spend_map': {},
+            'seg_budget_map': {},
+            'seg_daily_map': {},
+            'seg_count_map': {},
+            'active_campaigns': [],
+            'live_campaigns': [],
+            'inactive_campaigns': [],
+            'metrics_by_id': {},
+            'processed': 0,
+            'days_in_month': days_in_month,
+            'days_elapsed': days_elapsed,
+            'days_remaining': days_remaining,
+        }
+
+    all_campaign_ids = [c.google_campaign_id for c in db_campaigns]
+    logger.info(
+        '%s spend fetch: account_id=%s canonical=%d customer_id=%r mcc_id=%r',
+        log_prefix, account.id, len(db_campaigns),
+        account.google_customer_id, effective_mcc_id,
+    )
+    try:
+        metrics_by_id = get_campaign_mtd_spend(
+            refresh_token_str,
+            account.google_customer_id,
+            all_campaign_ids,
+            month_start,
+            mcc_customer_id=effective_mcc_id,
+        )
+    except GoogleAdsError as e:
+        logger.error(
+            '%s spend fetch failed: account_id=%s name=%r customer_id=%r mcc_id=%r error=%s',
+            log_prefix, account.id, account.account_name,
+            account.google_customer_id, effective_mcc_id, e,
+        )
+        return {
+            'ok': False,
+            'error': str(e),
+            'no_campaigns': False,
+            'no_active': False,
+            'recommendations': [],
+            'seg_spend_map': {},
+            'seg_budget_map': {},
+            'seg_daily_map': {},
+            'seg_count_map': {},
+            'active_campaigns': [],
+            'live_campaigns': [],
+            'inactive_campaigns': [],
+            'metrics_by_id': {},
+            'processed': 0,
+            'days_in_month': days_in_month,
+            'days_elapsed': days_elapsed,
+            'days_remaining': days_remaining,
+        }
+
+    _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
+        account, today, metrics_by_id
+    )
+
+    # Always clean today's snapshots — even if there are no active campaigns —
+    # so stale duplicate same-day rows can't survive across runs.
+    deleted_today = _delete_today_pacing_data(db_campaigns, today)
+    if deleted_today:
+        logger.info(
+            '%s replaced same-day snapshots: account_id=%s deleted=%d',
+            log_prefix, account.id, deleted_today,
+        )
+
+    if not active_campaigns:
+        logger.info('%s: account_id=%s has no campaigns to pace', log_prefix, account.id)
+        return {
+            'ok': True,
+            'no_campaigns': False,
+            'no_active': True,
+            'recommendations': [],
+            'seg_spend_map': {},
+            'seg_budget_map': {},
+            'seg_daily_map': {},
+            'seg_count_map': {},
+            'active_campaigns': [],
+            'live_campaigns': live_campaigns,
+            'inactive_campaigns': inactive_campaigns,
+            'metrics_by_id': metrics_by_id,
+            'processed': 0,
+            'days_in_month': days_in_month,
+            'days_elapsed': days_elapsed,
+            'days_remaining': days_remaining,
+        }
+
+    # --- Build segment aggregates (spend, current daily, count) --------------
+    seg_spend_map   = defaultdict(float)   # label → total MTD spend
+    seg_daily_map   = defaultdict(float)   # label → sum of current daily budgets
+    seg_count_map   = defaultdict(int)     # label → number of active campaigns
+    seg_budget_map  = {}                   # label → segment monthly budget
+    _counted_gids   = set()                # dedup by google_campaign_id
+
+    for _c in active_campaigns:
+        _label   = _c.budget_label or 'Primary'
+        _metrics = metrics_by_id.get(_c.google_campaign_id, {})
+        _cdaily  = _current_daily_for_run(_c, _metrics, today)
+        if _metrics.get('daily_budget_usd') is not None:
+            _c.current_daily_budget = _metrics.get('daily_budget_usd')
+        if _metrics.get('budget_resource_name'):
+            _c.budget_resource_name = _metrics.get('budget_resource_name')
+
+        if _c.google_campaign_id not in _counted_gids:
+            _cspend = _metrics.get('spend', 0.0)
+            seg_spend_map[_label] += _cspend
+            if _c.is_active:
+                # Only ENABLED campaigns inflate the equal-split fallback divisor.
+                seg_count_map[_label] += 1
+            _counted_gids.add(_c.google_campaign_id)
+            logger.info(
+                '%s spend item: account_id=%s gid=%s name=%r label=%r spend=%.2f is_active=%s',
+                log_prefix, account.id, _c.google_campaign_id, _c.campaign_name,
+                _label, _cspend, _c.is_active,
+            )
+
+        seg_daily_map[_label] += _cdaily
+        if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
+            seg_budget_map[_label] = _c.monthly_budget
+
+    logger.info(
+        '%s seg totals: account_id=%s seg_spend=%s seg_count=%s seg_budget=%s',
+        log_prefix, account.id, dict(seg_spend_map),
+        dict(seg_count_map), seg_budget_map,
+    )
+
+    # --- Per-campaign loop ---------------------------------------------------
+    recommendations = []
+    processed = 0
+
+    for campaign in active_campaigns:
+        label            = campaign.budget_label or 'Primary'
+        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
+        actual_spend     = campaign_metrics.get('spend', 0.0)
+        clicks           = campaign_metrics.get('clicks', None)
+        conversions      = campaign_metrics.get('conversions', None)
+        cpc              = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
+        current_daily    = _current_daily_for_run(campaign, campaign_metrics, today)
+
+        seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
+        seg_spend  = seg_spend_map.get(label, actual_spend)
+        seg_daily  = seg_daily_map.get(label, current_daily)
+        seg_count  = seg_count_map.get(label, 1)
+
+        seg_rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
+            seg_budget, seg_spend, seg_daily, today
+        )
+        rec = _allocated_recommendation(seg_rec, current_daily, seg_daily, seg_count)
+        campaign_expected_mtd = round(expected_mtd / seg_count, 2) if seg_count > 0 else expected_mtd
+        change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
+
+        snap = PacingData(
+            campaign_id=campaign.id,
+            date=today,
+            current_daily_budget=current_daily,
+            actual_spend=round(actual_spend, 2),
+            expected_spend=campaign_expected_mtd,
+            pace_ratio=round(pace_ratio, 3),
+            recommended_daily_budget=rec,
+            change_percent=round(change_pct, 1),
+            status=status,
+            clicks=clicks,
+            conversions=round(conversions, 1) if conversions is not None else None,
+            cpc=cpc,
+        )
+        db.session.add(snap)
+        processed += 1
+
+        recommendations.append({
+            'campaign_id': campaign.id,
+            'campaign_name': campaign.campaign_name,
+            'date': today.isoformat(),
+            'google_campaign_id': campaign.google_campaign_id,
+            'budget_resource_name': campaign.budget_resource_name,
+            'budget_label': label,
+            'monthly_budget': round(seg_budget, 2),
+            'segment_spend': round(seg_spend, 2),
+            'segment_campaign_count': seg_count,
+            'actual_spend': round(actual_spend, 2),
+            'expected_spend': campaign_expected_mtd,
+            'pace_ratio': round(pace_ratio, 3),
+            'current_daily_budget': round(current_daily, 2),
+            'recommended_daily_budget': rec,
+            'change_percent': round(change_pct, 1),
+            'status': status,
+            'days_elapsed': days_elapsed,
+            'days_remaining': days_remaining,
+            'days_in_month': days_in_month,
+            'clicks': clicks,
+            'conversions': round(conversions, 1) if conversions is not None else None,
+            'cpc': cpc,
+        })
+
+    return {
+        'ok': True,
+        'no_campaigns': False,
+        'no_active': False,
+        'recommendations': recommendations,
+        'seg_spend_map': dict(seg_spend_map),
+        'seg_budget_map': dict(seg_budget_map),
+        'seg_daily_map': dict(seg_daily_map),
+        'seg_count_map': dict(seg_count_map),
+        'active_campaigns': active_campaigns,
+        'live_campaigns': live_campaigns,
+        'inactive_campaigns': inactive_campaigns,
+        'metrics_by_id': metrics_by_id,
+        'processed': processed,
+        'days_in_month': days_in_month,
+        'days_elapsed': days_elapsed,
+        'days_remaining': days_remaining,
+    }
+
+
+# ---------------------------------------------------------------------------
 # /run — dry run, returns recommendations without touching Google Ads
 # ---------------------------------------------------------------------------
 
 @pacing_bp.route('/<int:account_id>/run', methods=['POST'])
 @login_required
 def run_pacing(account_id):
+    """Per-account dashboard "Run Pacing" button.
+
+    Thin HTTP wrapper around _execute_pacing_run(). Handles:
+      • OAuth token lookup + 401 if missing
+      • Optional Google Sheet budget sync (before) + spend writeback (after)
+      • Auto-pause warning calculation (Grant accounts exempt)
+      • JSON response shape consumed by AccountDashboard.jsx
+    """
     account = (
         Account.query
         .options(
@@ -260,21 +557,31 @@ def run_pacing(account_id):
         settings = AccountSettings(account_id=account.id)
         db.session.add(settings)
         db.session.commit()
-    effective_mcc_id = _effective_mcc_customer_id(account)
+        # Reload after committing AccountSettings so we don't operate on an
+        # expired account object further down (expire_on_commit=True fires here).
+        account = (
+            Account.query
+            .options(
+                selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                selectinload(Account.settings),
+            )
+            .get(account_id)
+        )
+        settings = account.settings
 
+    effective_mcc_id = _effective_mcc_customer_id(account)
     logger.info(
         "Run pacing start: account_id=%s account_name=%r customer_id=%r mcc_id=%r has_sheet_id=%s",
-        account.id,
-        account.account_name,
-        account.google_customer_id,
-        effective_mcc_id,
-        bool((settings.google_sheet_id or "").strip()),
+        account.id, account.account_name, account.google_customer_id,
+        effective_mcc_id, bool((settings.google_sheet_id or "").strip()),
     )
 
     today = datetime.utcnow().date()
-    month_start, _ = _month_bounds(today)
+    is_grant_account = 'grant' in (account.account_name or '').lower()
+    if is_grant_account:
+        logger.info('Account %s is a Grant account — auto-pause will be skipped', account_id)
 
-    # 1. Pull budgets from Google Sheet (if configured) — sheet is source of truth
+    # 1. Sheet sync (budgets) — sheet is source of truth.
     sheet_sync = None
     sheet_write = None
     if settings.google_sheet_id:
@@ -283,258 +590,67 @@ def run_pacing(account_id):
             sheet_sync = sync_sheet_budgets_for_account(account_id)
             logger.info(
                 "Run pacing sheet sync result: account_id=%s updated=%s skipped=%s",
-                account.id,
-                sheet_sync.get('updated_count'),
-                sheet_sync.get('skipped_count'),
+                account.id, sheet_sync.get('updated_count'), sheet_sync.get('skipped_count'),
             )
-            db.session.expire_all()  # Reload campaigns after budget sync
-            account = Account.query.options(
-                selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
-                selectinload(Account.settings),
-            ).get(account_id)
-            effective_mcc_id = _effective_mcc_customer_id(account)
         except Exception as e:
             logger.warning('Sheet sync failed for account %s: %s', account_id, e)
             sheet_sync = {'error': str(e)}
+        # Always reload after sheet sync attempt (success or failure) so
+        # monthly_budget values are current and pacing_data is fully pre-loaded.
+        account = (
+            Account.query
+            .options(
+                selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                selectinload(Account.settings),
+            )
+            .get(account_id)
+        )
+        settings = account.settings
     else:
         sheet_sync = {'warning': 'Google Sheet not configured for this account.'}
         logger.warning(
             "Run pacing skipping sheet sync: account_id=%s account_name=%r reason=%r",
-            account.id,
-            account.account_name,
-            "No google_sheet_id configured",
+            account.id, account.account_name, "No google_sheet_id configured",
         )
 
-    # 2. Split campaigns into live vs inactive.
-    #    Live  = is_active True (ENABLED + not expired, set during sync).
-    #    Inactive = paused, expired-ENABLED, or REMOVED — stored in DB but
-    #               only included in pacing if they have MTD spend > 0.
-    db_campaigns = canonical_campaigns(account.campaigns)
-    live_campaigns = [c for c in db_campaigns if c.is_active and _campaign_is_active_today(c, today)]
-    inactive_campaigns = [c for c in db_campaigns if not c.is_active]
+    # 2. Core pacing run — same code path as scheduler / run-all / mcc_sync.
+    result = _execute_pacing_run(account, token.refresh_token, today, log_prefix='Run pacing')
 
-    # Bail early only if there are truly no campaigns at all
-    if not db_campaigns:
-        return jsonify({
-            'recommendations': [],
-            'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
-            'sheet_sync': sheet_sync,
-        })
-
-    # Grant account safeguard: log exemption status upfront
-    is_grant_account = 'grant' in account.account_name.lower()
-    if is_grant_account:
-        logger.info('Account %s is a Grant account — auto-pause will be skipped', account_id)
-
-    # 3. Fetch MTD spend for ALL campaigns (live + inactive).
-    #    Inactive campaigns with spend > 0 this month are included in pacing.
-    #    Returns {campaign_id: {'spend': float, 'clicks': int, 'conversions': float}}
-    all_campaign_ids = [c.google_campaign_id for c in db_campaigns]
-    logger.info(
-        "Run pacing spend fetch: account_id=%s live=%d inactive=%d customer_id=%r mcc_id=%r",
-        account.id,
-        len(live_campaigns),
-        len(inactive_campaigns),
-        account.google_customer_id,
-        effective_mcc_id,
-    )
-    try:
-        metrics_by_id = get_campaign_mtd_spend(
-            token.refresh_token,
-            account.google_customer_id,
-            all_campaign_ids,
-            month_start,
-            mcc_customer_id=effective_mcc_id,
-        )
-    except GoogleAdsError as e:
-        logger.error(
-            "Spend fetch failed: account_id=%s account_name=%r customer_id=%r mcc_id=%r error=%s",
-            account.id,
-            account.account_name,
-            account.google_customer_id,
-            effective_mcc_id,
-            e,
-        )
+    if not result['ok']:
         return jsonify({
             'error': (
                 f"Google Ads API error for '{account.account_name}' "
-                f"(customer {account.google_customer_id}, MCC {effective_mcc_id or 'none'}): {str(e)}"
+                f"(customer {account.google_customer_id}, MCC {_effective_mcc_customer_id(account) or 'none'}): {result['error']}"
             )
         }), 502
 
-    # Pace all canonical live campaigns so apply preserves their current budget
-    # shares. Inactive campaigns only join the run if they have MTD spend.
-    _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
-        account, today, metrics_by_id
-    )
-
-    if not active_campaigns:
-        _delete_today_pacing_data(db_campaigns, today)
+    if result['no_campaigns'] or result['no_active']:
+        db.session.commit()  # persist any same-day delete from _execute_pacing_run
         return jsonify({
             'recommendations': [],
             'summary': {'total': 0, 'increase': 0, 'decrease': 0, 'on_pace': 0},
             'sheet_sync': sheet_sync,
-        })
-
-    # 4. Compute recommendations and save PacingData snapshots
-    #
-    # Segment-aware pacing: campaigns that share a budget_label share one
-    # segment budget pulled from the sheet. Pacing is computed at the segment
-    # level, then the recommended daily total is allocated back to campaigns in
-    # their current daily-budget ratio (e.g. 30/70 stays 30/70).
-    from collections import defaultdict
-
-    deleted_today = _delete_today_pacing_data(db_campaigns, today)
-    if deleted_today:
-        logger.info(
-            "Run pacing replaced same-day snapshots: account_id=%s deleted=%d",
-            account.id,
-            deleted_today,
-        )
-
-    # --- Build segment aggregates (spend, current daily, count) --------------
-    seg_spend_map   = defaultdict(float)   # label → total MTD spend
-    seg_daily_map   = defaultdict(float)   # label → sum of current daily budgets
-    seg_count_map   = defaultdict(int)     # label → number of campaigns
-    seg_budget_map  = {}                   # label → segment monthly budget
-
-    # Deduplicate spend by google_campaign_id — if two DB campaign rows share the
-    # same Google campaign ID (e.g. an active + a duplicate/re-imported row), the
-    # API returns one spend value for that ID. Without dedup, both rows claim the
-    # same spend and double-count it in seg_spend_map.
-    _counted_gids = set()  # google_campaign_ids already added to seg_spend_map
-
-    for _c in active_campaigns:
-        _label = _c.budget_label or 'Primary'
-        _metrics = metrics_by_id.get(_c.google_campaign_id, {})
-        _cdaily = _current_daily_for_run(_c, _metrics, today)
-        if _metrics.get('daily_budget_usd') is not None:
-            _c.current_daily_budget = _metrics.get('daily_budget_usd')
-        if _metrics.get('budget_resource_name'):
-            _c.budget_resource_name = _metrics.get('budget_resource_name')
-
-        # Only add spend/count once per unique Google campaign ID to avoid
-        # double-counting when duplicate DB rows share the same campaign ID.
-        if _c.google_campaign_id not in _counted_gids:
-            _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
-            seg_spend_map[_label] += _cspend
-            # seg_count_map is used for the equal-split fallback in _allocated_recommendation.
-            # Only count ENABLED (is_active) campaigns — paused campaigns that spent earlier
-            # this month are included for spend tracking but should NOT receive a new budget,
-            # so they must not inflate the divisor used to split the recommendation.
-            if _c.is_active:
-                seg_count_map[_label] += 1
-            _counted_gids.add(_c.google_campaign_id)
-            logger.info(
-                "Run pacing spend item: account_id=%s gid=%s name=%r label=%r spend=%.2f is_active=%s",
-                account.id, _c.google_campaign_id, _c.campaign_name, _label, _cspend, _c.is_active,
-            )
-
-        seg_daily_map[_label]  += _cdaily
-        # Use max so an inactive campaign with monthly_budget=0 never overwrites
-        # the correct budget that was synced from the sheet onto an active campaign.
-        if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
-            seg_budget_map[_label] = _c.monthly_budget
-
-    logger.info(
-        "Run pacing seg totals: account_id=%s seg_spend=%s seg_count=%s seg_budget=%s",
-        account.id,
-        dict(seg_spend_map),
-        dict(seg_count_map),
-        seg_budget_map,
-    )
-    # --- Per-campaign loop ---------------------------------------------------
-    recommendations = []
-    month_start, month_end = _month_bounds(today)
-    days_in_month  = (month_end - month_start).days + 1
-    days_elapsed   = (today - month_start).days + 1
-    days_remaining = (month_end - today).days + 1
-
-    for campaign in active_campaigns:
-        label = campaign.budget_label or 'Primary'
-        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
-        actual_spend = campaign_metrics.get('spend', 0.0)
-        clicks       = campaign_metrics.get('clicks', None)
-        conversions  = campaign_metrics.get('conversions', None)
-        cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
-
-        # Current daily for this individual campaign
-        current_daily = _current_daily_for_run(campaign, campaign_metrics, today)
-
-        # --- Segment-level computation ----------------------------------------
-        seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
-        seg_spend  = seg_spend_map.get(label, actual_spend)
-        seg_daily  = seg_daily_map.get(label, current_daily)
-        seg_count  = seg_count_map.get(label, 1)
-
-        seg_rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
-            seg_budget, seg_spend, seg_daily, today
-        )
-
-        # Preserve current daily-budget ratio inside the account/segment.
-        rec = _allocated_recommendation(seg_rec, current_daily, seg_daily, seg_count)
-
-        # For display: each campaign's proportional share of expected MTD spend
-        campaign_expected_mtd = round(expected_mtd / seg_count, 2) if seg_count > 0 else expected_mtd
-
-        change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
-
-        # Save snapshot — actual_spend is per-campaign; budget/pacing metrics are segment-level
-        snap = PacingData(
-            campaign_id=campaign.id,
-            date=today,
-            current_daily_budget=current_daily,
-            actual_spend=round(actual_spend, 2),
-            expected_spend=campaign_expected_mtd,
-            pace_ratio=round(pace_ratio, 3),
-            recommended_daily_budget=rec,
-            change_percent=round(change_pct, 1),
-            status=status,
-            clicks=clicks,
-            conversions=round(conversions, 1) if conversions is not None else None,
-            cpc=cpc,
-        )
-        db.session.add(snap)
-
-        recommendations.append({
-            'campaign_id': campaign.id,
-            'campaign_name': campaign.campaign_name,
-            'date': today.isoformat(),
-            'google_campaign_id': campaign.google_campaign_id,
-            'budget_resource_name': campaign.budget_resource_name,
-            'budget_label': label,
-            'monthly_budget': round(seg_budget, 2),         # full segment budget
-            'segment_spend': round(seg_spend, 2),           # total segment MTD spend
-            'segment_campaign_count': seg_count,
-            'actual_spend': round(actual_spend, 2),         # this campaign's spend
-            'expected_spend': campaign_expected_mtd,
-            'pace_ratio': round(pace_ratio, 3),             # segment-level pace ratio
-            'current_daily_budget': round(current_daily, 2),
-            'recommended_daily_budget': rec,
-            'change_percent': round(change_pct, 1),
-            'status': status,
-            'days_elapsed': days_elapsed,
-            'days_remaining': days_remaining,
-            'days_in_month': days_in_month,
-            'clicks': clicks,
-            'conversions': round(conversions, 1) if conversions is not None else None,
-            'cpc': cpc,
         })
 
     db.session.commit()
 
+    recommendations = result['recommendations']
+    seg_spend_map   = result['seg_spend_map']
+    seg_budget_map  = result['seg_budget_map']
+    seg_daily_map   = result['seg_daily_map']
+    seg_count_map   = result['seg_count_map']
+    active_campaigns = result['active_campaigns']
+
+    # 3. Sheet writeback (MTD spend).
     if settings.google_sheet_id:
         try:
             from routes.sheets import write_sheet_spend_for_account
             sheet_write = write_sheet_spend_for_account(
-                account_id,
-                segment_spend_by_label=dict(seg_spend_map),
+                account_id, segment_spend_by_label=dict(seg_spend_map),
             )
             logger.info(
                 "Run pacing sheet write result: account_id=%s written=%s skipped=%s",
-                account.id,
-                sheet_write.get('written_count'),
-                sheet_write.get('skipped_count'),
+                account.id, sheet_write.get('written_count'), sheet_write.get('skipped_count'),
             )
         except Exception as e:
             logger.warning('Sheet writeback failed for account %s: %s', account_id, e)
@@ -550,12 +666,11 @@ def run_pacing(account_id):
         seg_budget_map, seg_spend_map, seg_daily_map, seg_count_map
     )
 
-    # 5. Check auto-pause threshold
-    # Grant accounts are exempt from auto-pause (they can safely exceed caps).
+    # 4. Auto-pause threshold check (Grant accounts exempt).
     auto_pause_triggered = None
     if settings.auto_pause_enabled and active_campaigns and not is_grant_account:
         total_budget = sum(seg_budget_map.values())
-        total_spend = sum(seg_spend_map.values())
+        total_spend  = sum(seg_spend_map.values())
         if total_budget > 0:
             spend_pct = (total_spend / total_budget) * 100
             if spend_pct >= settings.auto_pause_threshold:
@@ -908,47 +1023,25 @@ def manual_pause(account_id):
 # ---------------------------------------------------------------------------
 
 def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
-    """Fetch MTD spend and write PacingData for one account.
+    """Fetch MTD spend and write PacingData for one account (no HTTP context).
 
-    Accepts a plain refresh_token_str so it can be called from background
-    threads that don't have a full OAuth token ORM object handy.
-    Mirrors the logic in the scheduler (_run_pacing_for_account in app.py).
+    Used by:
+      • the 06:00 UTC scheduler (app.py),
+      • the run-all background worker (_run_pacing_all_job above), and
+      • the MCC sync background job (routes/accounts.py).
+
+    Thin wrapper around _execute_pacing_run() — the same core that powers the
+    per-account /run route. Adds the PacingRun audit row + sheet writeback that
+    the HTTP route handles inline.
     """
-    from datetime import datetime
-
     today = datetime.utcnow().date()
-    month_start, _ = _month_bounds(today)
     settings = account.settings
-    effective_mcc_id = _effective_mcc_customer_id(account)
 
-    is_grant_account = 'grant' in account.account_name.lower()
+    result = _execute_pacing_run(
+        account, refresh_token_str, today, log_prefix='run_pacing_for_account',
+    )
 
-    db_campaigns = canonical_campaigns(account.campaigns)
-    live_campaigns = [
-        c for c in db_campaigns
-        if c.is_active and _campaign_is_active_today(c, today)
-    ]
-    inactive_campaigns = [c for c in db_campaigns if not c.is_active]
-
-    if not db_campaigns:
-        logger.info('run_pacing_for_account: account %s has no campaigns — skipping', account.id)
-        return
-
-    # Fetch spend for ALL campaigns so inactive ones with MTD spend get included
-    all_campaign_ids = [c.google_campaign_id for c in db_campaigns]
-    try:
-        metrics_by_id = get_campaign_mtd_spend(
-            refresh_token_str,
-            account.google_customer_id,
-            all_campaign_ids,
-            month_start,
-            mcc_customer_id=effective_mcc_id,
-        )
-    except GoogleAdsError as e:
-        logger.error(
-            'run_pacing_for_account spend fetch failed: account_id=%s name=%r error=%s',
-            account.id, account.account_name, e,
-        )
+    if not result['ok']:
         run = PacingRun(
             account_id=account.id,
             run_type='AUTO',
@@ -956,108 +1049,25 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
             campaigns_processed=0,
             adjustments_made=0,
             status='FAILED',
-            error_message=str(e),
+            error_message=result.get('error'),
         )
         db.session.add(run)
         db.session.commit()
         return
 
-    # Pace all canonical live campaigns so apply preserves their current budget
-    # shares. Inactive campaigns only join the run if they have MTD spend.
-    _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
-        account, today, metrics_by_id
-    )
-
-    if not active_campaigns:
-        _delete_today_pacing_data(db_campaigns, today)
-        logger.info('run_pacing_for_account: account %s has no campaigns to pace — skipping', account.id)
+    if result['no_campaigns'] or result['no_active']:
+        db.session.commit()  # persists same-day delete if _execute_pacing_run did one
+        logger.info(
+            'run_pacing_for_account: account %s nothing to pace (no_campaigns=%s no_active=%s)',
+            account.id, result['no_campaigns'], result['no_active'],
+        )
         return
 
-    # Segment-aware pacing (mirrors the logic in run_pacing route).
-    # Build segment aggregates first so the per-campaign loop can use them.
-    from collections import defaultdict
-
-    seg_spend_map  = defaultdict(float)
-    seg_daily_map  = defaultdict(float)
-    seg_count_map  = defaultdict(int)
-    seg_budget_map = {}
-
-    deleted_today = _delete_today_pacing_data(db_campaigns, today)
-    if deleted_today:
-        logger.info(
-            'run_pacing_for_account replaced same-day snapshots: account_id=%s deleted=%d',
-            account.id,
-            deleted_today,
-        )
-
-    # Deduplicate spend by google_campaign_id (same fix as in run_pacing route).
-    _counted_gids = set()
-
-    for _c in active_campaigns:
-        _label = _c.budget_label or 'Primary'
-        _metrics = metrics_by_id.get(_c.google_campaign_id, {})
-        _cdaily = _current_daily_for_run(_c, _metrics, today)
-        if _metrics.get('daily_budget_usd') is not None:
-            _c.current_daily_budget = _metrics.get('daily_budget_usd')
-        if _metrics.get('budget_resource_name'):
-            _c.budget_resource_name = _metrics.get('budget_resource_name')
-
-        if _c.google_campaign_id not in _counted_gids:
-            _cspend = metrics_by_id.get(_c.google_campaign_id, {}).get('spend', 0.0)
-            seg_spend_map[_label] += _cspend
-            # Only count ENABLED (is_active) campaigns in the equal-split fallback divisor.
-            # Paused campaigns contribute spend but should not receive new budget allocations.
-            if _c.is_active:
-                seg_count_map[_label] += 1
-            _counted_gids.add(_c.google_campaign_id)
-
-        seg_daily_map[_label]  += _cdaily
-        # Use max so an inactive campaign with monthly_budget=0 never overwrites
-        # the correct budget that was synced from the sheet onto an active campaign.
-        if _c.monthly_budget and _c.monthly_budget > seg_budget_map.get(_label, 0):
-            seg_budget_map[_label] = _c.monthly_budget
-
-    processed = 0
-    for campaign in active_campaigns:
-        label = campaign.budget_label or 'Primary'
-        campaign_metrics = metrics_by_id.get(campaign.google_campaign_id, {})
-        actual_spend = campaign_metrics.get('spend', 0.0)
-        clicks = campaign_metrics.get('clicks', None)
-        conversions = campaign_metrics.get('conversions', None)
-        cpc = round(actual_spend / clicks, 2) if clicks and clicks > 0 else None
-
-        current_daily = _current_daily_for_run(campaign, campaign_metrics, today)
-
-        seg_budget = seg_budget_map.get(label, campaign.monthly_budget)
-        seg_spend  = seg_spend_map.get(label, actual_spend)
-        seg_daily  = seg_daily_map.get(label, current_daily)
-        seg_count  = seg_count_map.get(label, 1)
-
-        seg_rec, status, pace_ratio, expected_mtd, daily_target = _compute_recommendation(
-            seg_budget, seg_spend, seg_daily, today
-        )
-        rec = _allocated_recommendation(seg_rec, current_daily, seg_daily, seg_count)
-        campaign_expected_mtd = round(expected_mtd / seg_count, 2) if seg_count > 0 else expected_mtd
-
-        _, month_end = _month_bounds(today)
-        change_pct = ((rec - current_daily) / current_daily * 100) if current_daily > 0 else 0.0
-
-        snap = PacingData(
-            campaign_id=campaign.id,
-            date=today,
-            current_daily_budget=current_daily,
-            actual_spend=round(actual_spend, 2),
-            expected_spend=campaign_expected_mtd,
-            pace_ratio=round(pace_ratio, 3),
-            recommended_daily_budget=rec,
-            change_percent=round(change_pct, 1),
-            status=status,
-            clicks=clicks,
-            conversions=round(conversions, 1) if conversions is not None else None,
-            cpc=cpc,
-        )
-        db.session.add(snap)
-        processed += 1
+    processed = result['processed']
+    seg_spend_map  = result['seg_spend_map']
+    seg_budget_map = result['seg_budget_map']
+    seg_daily_map  = result['seg_daily_map']
+    seg_count_map  = result['seg_count_map']
 
     run = PacingRun(
         account_id=account.id,
@@ -1074,13 +1084,12 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
         account.id, account.account_name, processed,
     )
 
-    # Write spend back to sheet
+    # Sheet writeback (MTD spend back to Google Sheet column D).
     if settings and settings.google_sheet_id:
         try:
             from routes.sheets import write_sheet_spend_for_account
             write_sheet_spend_for_account(
-                account.id,
-                segment_spend_by_label=dict(seg_spend_map),
+                account.id, segment_spend_by_label=dict(seg_spend_map),
             )
         except Exception as e:
             logger.warning('Sheet write-back failed for account %s: %s', account.id, e)

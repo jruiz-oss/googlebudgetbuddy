@@ -191,16 +191,37 @@ def create_app():
 # ── Scheduled pacing job ──────────────────────────────────────────────────────
 
 def _scheduled_pacing_job(app):
-    """Run pacing for every account — fires daily at 06:00 UTC."""
+    """Run pacing for every account — fires daily at 06:00 UTC.
+
+    Same fresh-reload-per-iteration pattern as _run_pacing_all_job: bulk-loading
+    accounts up front leaves them stale after the first run_pacing_for_account()
+    commit (expire_on_commit=True), which silently corrupts segment maps for
+    accounts 2..N and reintroduces the 2x MTD spend bug. We re-query each
+    account inside the loop with pacing_data pre-loaded.
+    """
+    from sqlalchemy.orm import selectinload
+
     with app.app_context():
-        from database import Account, AccountSettings, GoogleOAuthToken, PacingRun
+        from database import Account, Campaign, GoogleOAuthToken
         from routes.sheets import sync_sheet_budgets_for_account
+        from routes.pacing import run_pacing_for_account
 
-        accounts = Account.query.all()
-        logger.info('Scheduled pacing: processing %d account(s)', len(accounts))
+        account_ids = [row[0] for row in db.session.query(Account.id).all()]
+        logger.info('Scheduled pacing: processing %d account(s)', len(account_ids))
 
-        for account in accounts:
+        for account_id in account_ids:
             try:
+                account = (
+                    Account.query
+                    .options(
+                        selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                        selectinload(Account.settings),
+                    )
+                    .get(account_id)
+                )
+                if account is None:
+                    continue
+
                 settings = account.settings
                 if not settings:
                     continue
@@ -213,19 +234,28 @@ def _scheduled_pacing_job(app):
                     logger.warning('No valid token for account %s — skipping', account.id)
                     continue
 
-                # Sheet sync first
+                # Sheet sync first so budgets are current. Reload account
+                # afterwards regardless of success/failure so pacing always
+                # sees fresh objects + post-sync monthly_budget.
                 if settings.google_sheet_id:
                     try:
                         sync_sheet_budgets_for_account(account.id)
                     except Exception as e:
                         logger.warning('Sheet sync failed for account %s: %s', account.id, e)
+                    account = (
+                        Account.query
+                        .options(
+                            selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                            selectinload(Account.settings),
+                        )
+                        .get(account_id)
+                    )
 
-                # Run pacing
-                from routes.pacing import run_pacing_for_account
+                # Run pacing through the shared core.
                 run_pacing_for_account(account, token.refresh_token, triggered_by='scheduler')
 
             except Exception as e:
-                logger.error('Scheduled pacing failed for account %s: %s', account.id, e)
+                logger.error('Scheduled pacing failed for account %s: %s', account_id, e)
 
 
 # ── Manual cron endpoint ───────────────────────────────────────────────────────
