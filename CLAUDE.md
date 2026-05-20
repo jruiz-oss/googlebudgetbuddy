@@ -176,6 +176,13 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-20 — Fix run-all pacing: stale session objects causing MTD spend duplication
+**What:** Fixed `_run_pacing_all_job` operating on expired SQLAlchemy objects for accounts 2+ in the loop, which caused segment spend maps and `_is_zombie_campaign()` to produce incorrect results (doubled MTD spend, wrong recommendations).
+**Root cause:** `db.session.commit()` inside `run_pacing_for_account` triggers `expire_on_commit=True`, expiring every ORM object in the session. The next account in the loop used the now-expired Account object from the initial bulk load. Accessing `account.campaigns` lazy-loaded Campaign rows *without* `pacing_data` pre-loaded, so `canonical_campaigns()` and `_is_zombie_campaign()` fired N+1 lazy queries against a session that still had in-memory references to rows deleted by `_delete_today_pacing_data(..., synchronize_session=False)`. This left orphaned objects in the identity map and caused stale data to feed the segment aggregation maps. Additionally, if `sync_sheet_budgets_for_account` threw an exception, the reload was bypassed entirely.
+**Fix:** Changed `_run_pacing_all_job` to fetch only account IDs up front, then reload each account fresh with `selectinload(Account.campaigns).selectinload(Campaign.pacing_data)` at the *start* of every loop iteration — before sheet sync, not only inside the `if settings.google_sheet_id` block. Also always reloads after sheet sync attempt (success or failure) so `monthly_budget` values are current.
+**Changes:**
+- `backend/routes/pacing.py`: `_run_pacing_all_job` now queries only IDs, then loads each account fresh per iteration with full selectinload. Removed the old conditional reload that only fired on sheet sync success.
+
 ### 2026-05-19 — Yesterday trend badge on pace %
 **What:** Added a "↑ Improving · was X%" / "↓ Worsening · was X%" trend indicator wherever pace % is shown — on Home page account cards and the AccountDashboard header + Pace stat.
 **Why:** Knowing the current pace % in isolation doesn't tell you if things are getting better or worse. The trend badge shows direction by comparing today's % DIFF against yesterday's.

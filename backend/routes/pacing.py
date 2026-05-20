@@ -739,39 +739,60 @@ def _run_pacing_all_job(app, refresh_token_str):
     """
     try:
         with app.app_context():
-            accounts = Account.query.options(
-                selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
-                selectinload(Account.settings),
-            ).all()
+            # Fetch only IDs up front — each account is reloaded fresh inside the
+            # loop so we never operate on expired objects left over from a previous
+            # account's db.session.commit() (expire_on_commit=True fires after every
+            # commit and leaves the bulk-loaded objects stale).
+            account_ids = [row[0] for row in db.session.query(Account.id).all()]
 
-            logger.info('run-all background: processing %d account(s)', len(accounts))
+            logger.info('run-all background: processing %d account(s)', len(account_ids))
 
-            for account in accounts:
+            for account_id in account_ids:
                 try:
+                    # Always load fresh with pacing_data pre-joined so that
+                    # canonical_campaigns() and _is_zombie_campaign() never
+                    # fall back to N+1 lazy queries against stale session state.
+                    account = Account.query.options(
+                        selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                        selectinload(Account.settings),
+                    ).get(account_id)
+                    if account is None:
+                        continue
+
                     settings = account.settings
                     if not settings:
                         settings = AccountSettings(account_id=account.id)
                         db.session.add(settings)
                         db.session.commit()
+                        # Reload after creating settings so the account object is fresh
+                        account = Account.query.options(
+                            selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                            selectinload(Account.settings),
+                        ).get(account_id)
+                        settings = account.settings
 
-                    # Sheet sync first so budgets are current
+                    # Sheet sync first so budgets are current.
+                    # Reload account afterwards regardless of success/failure so
+                    # pacing always works with a fully-loaded, post-sync object.
                     if settings.google_sheet_id:
                         try:
                             from routes.sheets import sync_sheet_budgets_for_account
                             sync_sheet_budgets_for_account(account.id)
-                            db.session.expire_all()
-                            account = Account.query.options(
-                                selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
-                                selectinload(Account.settings),
-                            ).get(account.id)
-                            settings = account.settings
                         except Exception as e:
                             logger.warning('run-all: sheet sync failed for account %s: %s', account.id, e)
+                        # Always reload after sheet sync attempt (success or failure)
+                        # so campaign.monthly_budget values are current and
+                        # pacing_data is fully pre-loaded.
+                        account = Account.query.options(
+                            selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                            selectinload(Account.settings),
+                        ).get(account_id)
+                        settings = account.settings
 
                     run_pacing_for_account(account, refresh_token_str, triggered_by='run_all')
 
                 except Exception as e:
-                    logger.error('run-all background: pacing failed for account %s: %s', account.id, e)
+                    logger.error('run-all background: pacing failed for account %s: %s', account_id, e)
 
             logger.info('run-all background: completed all accounts')
 
