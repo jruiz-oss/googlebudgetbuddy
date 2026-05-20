@@ -24,6 +24,7 @@ from database import (  # noqa: E402
 from routes.pacing import _delete_today_pacing_data  # noqa: E402
 from routes.pacing import _allocated_recommendation, _compute_recommendation, _segment_summaries_from_maps  # noqa: E402
 from routes.pacing import _campaigns_for_pacing, _execute_pacing_run, _is_zombie_campaign  # noqa: E402
+from routes.pacing import _refresh_campaign_state_from_api  # noqa: E402
 from routes.sheets import _google_ads_row_assignments, write_google_ads_spend_for_account  # noqa: E402
 
 
@@ -407,6 +408,36 @@ class SpendAccuracyTest(unittest.TestCase):
             for row in rows
         }
         self.assertEqual(gid_to_spend, {'100': 1000, '200': 600})
+
+    def test_refresh_campaign_state_flips_paused_in_api_to_inactive(self):
+        """A campaign the user just paused in Google Ads should be flipped to
+        is_active=False the next pacing run, even if DB still has stale True."""
+        c = Campaign(
+            campaign_name='Recently paused',
+            google_campaign_id='42',
+            is_active=True,         # stale DB state
+            google_status='ENABLED',
+        )
+        metrics_by_id = {
+            '42': {'status': 'PAUSED', 'end_date': None, 'spend': 0},
+        }
+        _refresh_campaign_state_from_api([c], metrics_by_id)
+        self.assertEqual(c.google_status, 'PAUSED')
+        self.assertFalse(c.is_active)
+
+    def test_refresh_campaign_state_stores_end_date_from_api(self):
+        c = Campaign(
+            campaign_name='Ends this month',
+            google_campaign_id='99',
+            is_active=True,
+            google_end_date=None,
+        )
+        metrics_by_id = {
+            '99': {'status': 'ENABLED', 'end_date': '2026-05-25', 'spend': 100},
+        }
+        _refresh_campaign_state_from_api([c], metrics_by_id)
+        self.assertEqual(c.google_end_date, date(2026, 5, 25))
+        self.assertTrue(c.is_active)
 
     # NOTE: A direct DB test for duplicate-row dedup inside _execute_pacing_run
     # isn't possible on fresh DBs anymore — the `uq_campaign_account_google_id`

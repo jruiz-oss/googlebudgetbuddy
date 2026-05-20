@@ -236,6 +236,32 @@ def _is_zombie_campaign(campaign, today, api_spend):
     return False
 
 
+def _refresh_campaign_state_from_api(db_campaigns, metrics_by_id):
+    """Sync live Google Ads state (status, end_date, daily budget, budget RN)
+    onto canonical DB campaigns before the include/exclude filter runs.
+
+    Without this, a campaign the user just paused in Google Ads still shows
+    is_active=True from the last sync, slips into the "live" bucket, and the
+    Status pill incorrectly says "Live" instead of "Paused".
+    """
+    for c in db_campaigns:
+        m = metrics_by_id.get(c.google_campaign_id, {}) or {}
+        api_status = (m.get('status') or '').upper() or None
+        if api_status:
+            c.google_status = api_status
+            c.is_active = (api_status == 'ENABLED')
+        api_end = m.get('end_date')
+        if api_end:
+            try:
+                c.google_end_date = datetime.strptime(api_end, '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                pass
+        if m.get('daily_budget_usd') is not None:
+            c.current_daily_budget = m.get('daily_budget_usd')
+        if m.get('budget_resource_name'):
+            c.budget_resource_name = m.get('budget_resource_name')
+
+
 def _campaigns_for_pacing(account, today, metrics_by_id):
     """Return canonical live campaigns plus inactive campaigns with MTD spend.
 
@@ -363,6 +389,11 @@ def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
             'days_remaining': days_remaining,
         }
 
+    # Refresh live state (status + end_date) on every canonical campaign BEFORE
+    # the include/exclude filter runs. This is what keeps "Status" pills accurate
+    # and what lets the zombie filter catch campaigns that the user just paused.
+    _refresh_campaign_state_from_api(db_campaigns, metrics_by_id)
+
     _, live_campaigns, inactive_campaigns, active_campaigns = _campaigns_for_pacing(
         account, today, metrics_by_id
     )
@@ -408,10 +439,8 @@ def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
         _label   = _c.budget_label or 'Primary'
         _metrics = metrics_by_id.get(_c.google_campaign_id, {})
         _cdaily  = _current_daily_for_run(_c, _metrics, today)
-        if _metrics.get('daily_budget_usd') is not None:
-            _c.current_daily_budget = _metrics.get('daily_budget_usd')
-        if _metrics.get('budget_resource_name'):
-            _c.budget_resource_name = _metrics.get('budget_resource_name')
+        # State (status, end_date, daily budget, budget RN) was already
+        # written back to the campaign by _refresh_campaign_state_from_api.
 
         if _c.google_campaign_id not in _counted_gids:
             _cspend = _metrics.get('spend', 0.0)

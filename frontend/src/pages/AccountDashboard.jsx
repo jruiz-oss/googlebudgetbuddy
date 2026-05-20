@@ -37,6 +37,16 @@ function campaignKey(c) {
   const digits = String(c.google_campaign_id || '').replace(/\D/g, '');
   return digits || `db:${c.id}`;
 }
+function statusLabel(c) {
+  // Prefer the live Google Ads status from the latest pacing run (refreshed
+  // every pacing run via _refresh_campaign_state_from_api). Falls back to
+  // the DB is_active flag only when google_status hasn't been hydrated yet.
+  const gs = (c.google_status || '').toUpperCase();
+  if (gs === 'ENABLED') return 'Live';
+  if (gs === 'PAUSED')  return 'Paused';
+  if (gs === 'REMOVED') return 'Ended';
+  return c.is_active ? 'Live' : 'Inactive w/ spend';
+}
 function uniqueCampaigns(campaigns) {
   const byKey = new Map();
   for (const c of campaigns || []) {
@@ -782,7 +792,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                 <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${c.id}`)}>
                   <td style={{ fontWeight: 500 }}>{c.campaign_name}</td>
                   <td>{c.budget_label || 'Primary'}</td>
-                  <td>{c.is_active ? 'Live' : (c.google_status === 'PAUSED' ? 'Paused' : 'Inactive w/ spend')}</td>
+                  <td>{statusLabel(c)}</td>
                   <td>{fmt(cd)}</td>
                   <td>{share.toFixed(1)}%</td>
                   <td>{fmt(c.latest_pacing?.actual_spend || 0)}</td>

@@ -312,6 +312,7 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
         SELECT
           campaign.id,
           campaign.status,
+          campaign.end_date,
           campaign.advertising_channel_type,
           campaign_budget.amount_micros,
           campaign_budget.resource_name,
@@ -325,27 +326,69 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
 
     rows = _gaql(access_token, customer_id, developer_token, query, mcc_customer_id=mcc_customer_id)
 
+    # Also pull current status/end_date for campaigns with zero spend this month
+    # (those won't appear in the metrics-by-date query above). Without this, we'd
+    # never refresh google_status / google_end_date for paused or zero-spend live
+    # campaigns and the dashboard would keep showing stale "Live" badges.
+    status_query = f"""
+        SELECT
+          campaign.id,
+          campaign.status,
+          campaign.end_date,
+          campaign.advertising_channel_type,
+          campaign_budget.amount_micros,
+          campaign_budget.resource_name
+        FROM campaign
+        WHERE campaign.id IN ({id_list})
+    """
+    try:
+        status_rows = _gaql(
+            access_token, customer_id, developer_token, status_query,
+            mcc_customer_id=mcc_customer_id,
+        )
+    except Exception:
+        status_rows = []
+
     result = {}
-    for r in rows:
-        cid = str(r.get('campaign', {}).get('id', ''))
-        channel_type = (r.get('campaign', {}).get('advertisingChannelType') or '').upper()
-        # Skip phantom channel types (mirrors script's phantom budget fix)
+
+    def _ensure(cid, campaign_obj, budget_obj):
+        if cid in result:
+            return
+        budget_micros = int(budget_obj.get('amountMicros', 0) or 0) if budget_obj else 0
+        result[cid] = {
+            'spend': 0.0,
+            'clicks': 0,
+            'conversions': 0.0,
+            'daily_budget_usd': round(budget_micros / 1_000_000, 2),
+            'budget_resource_name': (budget_obj or {}).get('resourceName', ''),
+            'status': (campaign_obj or {}).get('status') or None,
+            'end_date': (campaign_obj or {}).get('endDate') or None,
+        }
+
+    # Seed result with status/end_date for ALL campaigns (including 0-spend).
+    for r in status_rows:
+        c = r.get('campaign', {})
+        channel_type = (c.get('advertisingChannelType') or '').upper()
         if channel_type in _PHANTOM_CHANNEL_TYPES:
             continue
+        cid = str(c.get('id', ''))
+        if not cid:
+            continue
+        _ensure(cid, c, r.get('campaignBudget', {}))
+
+    # Now add metrics from the date-range query.
+    for r in rows:
+        c = r.get('campaign', {})
+        channel_type = (c.get('advertisingChannelType') or '').upper()
+        if channel_type in _PHANTOM_CHANNEL_TYPES:
+            continue
+        cid = str(c.get('id', ''))
         m = r.get('metrics', {})
         b = r.get('campaignBudget', {})
         micros = int(m.get('costMicros', 0) or 0)
         clicks = int(m.get('clicks', 0) or 0)
         conversions = float(m.get('conversions', 0) or 0)
-        if cid not in result:
-            budget_micros = int(b.get('amountMicros', 0) or 0)
-            result[cid] = {
-                'spend': 0.0,
-                'clicks': 0,
-                'conversions': 0.0,
-                'daily_budget_usd': round(budget_micros / 1_000_000, 2),
-                'budget_resource_name': b.get('resourceName', ''),
-            }
+        _ensure(cid, c, b)
         result[cid]['spend'] += micros / 1_000_000
         result[cid]['clicks'] += clicks
         result[cid]['conversions'] += conversions
