@@ -567,11 +567,9 @@ html, body {
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+  word-break: break-word;
 }
 .card-meta {
   font-size: 10.5px;
