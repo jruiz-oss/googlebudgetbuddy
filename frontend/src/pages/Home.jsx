@@ -21,10 +21,8 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   const status       = absDelta > 10 ? 'over' : absDelta > 5 ? 'warn' : 'ok';
   const daysLeft     = daysInMonth - daysIn;
   const dailyCurrent = daysIn > 0 ? spend / daysIn : 0;
-  // Matches the Google Sheet formula: (Budget - Spend) / days_in_month
-  // Dividing by the full month (not just remaining days) stays consistent with
-  // the sheet's =(C-D)/$E$2 calculation where $E$2 = total days in month.
-  const dailyRec     = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
+  // Divide by days remaining so the daily rate actually reaches monthly budget by EOM.
+  const dailyRec     = daysLeft > 0 ? Math.max(0, monthly - spend) / daysLeft : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
   return { idealSpend, deltaPct, pacePct: pctOfBudget, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }

@@ -41,9 +41,10 @@ function buildNotifications(accounts) {
       }, 0);
     if (monthly === 0 && spend === 0) continue;
 
+    const daysLeft   = daysInMonth - daysIn;
     const idealSpend = monthly > 0 ? monthly * (daysIn / daysInMonth) : 0;
     const deltaPct   = idealSpend > 0 ? ((spend / idealSpend) - 1) * 100 : 0;
-    const dailyRec   = daysInMonth > 0 ? Math.max(0, monthly - spend) / daysInMonth : 0;
+    const dailyRec   = daysLeft > 0 ? Math.max(0, monthly - spend) / daysLeft : 0;
 
     const fmt = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
     const fmtPct = (n) => Math.abs(n).toFixed(1) + '%';

@@ -1,14 +1,14 @@
 """
 Pacing routes — run pacing and apply budget recommendations.
 
-Math (mirrors the Google Sheet exactly):
+Math:
   daily_target        = monthly_budget / days_in_month       (informational)
   expected_mtd        = daily_target * days_elapsed          (informational)
   pace_ratio          = actual_spend / monthly_budget        (sheet "pace %" / budget used)
-  recommended_daily   = (monthly_budget - actual_spend) / days_in_month
+  recommended_daily   = (monthly_budget - actual_spend) / days_remaining
 
-  Dividing by days_in_month (not days_remaining) matches the Google Sheet
-  formula: =(C-D)/$E$2 where $E$2 = total days in the month.
+  Dividing by days_remaining (not days_in_month) gives a daily rate that
+  will actually reach the monthly budget by end of month.
 
 Status:
   ON_PACE  when |recommended - current_daily| < $0.01
@@ -76,13 +76,12 @@ def _compute_recommendation(monthly_budget, actual_spend, current_daily, today):
     # against ideal MTD spend. Keep expected_mtd for charts/projection only.
     pace_ratio = (actual_spend / monthly_budget) if monthly_budget > 0 else 0.0
 
-    if days_in_month <= 0 or monthly_budget <= 0:
+    if days_remaining <= 0 or monthly_budget <= 0:
         recommended = 0.0
     else:
-        # Mirrors the Google Sheet formula: (Budget - Spend) / days_in_month.
-        # Dividing by the full month length (not just remaining days) gives a
-        # conservative daily target that stays consistent across the month.
-        recommended = max(0.0, (monthly_budget - actual_spend) / days_in_month)
+        # Divide by days_remaining so the recommended daily rate will actually
+        # reach the monthly budget by end of month.
+        recommended = max(0.0, (monthly_budget - actual_spend) / days_remaining)
 
     diff = recommended - (current_daily or 0)
     if abs(diff) < 0.01:
