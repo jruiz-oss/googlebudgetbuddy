@@ -702,7 +702,10 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   const filteredAccounts = useMemo(() => {
     let list = accounts.map(a => {
       const { pace } = accountPacing(a, daysIn, daysInMonth);
-      return { a, status: pace.status };
+      // Use sign-aware filter status so "Over" and "Under" buttons work correctly.
+      // pace.status uses |deltaPct| so both -99% and +99% become 'over' — wrong for filtering.
+      const filterStatus = pace.deltaPct > 5 ? 'over' : pace.deltaPct < -5 ? 'under' : 'ok';
+      return { a, status: filterStatus };
     });
     if (filter !== 'all') list = list.filter(x => x.status === filter);
     if (q.trim()) {

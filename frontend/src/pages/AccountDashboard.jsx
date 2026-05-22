@@ -578,6 +578,20 @@ export default function AccountDashboard({ onPacingComplete }) {
 
   const segments    = getSegments(account, campaigns);
   const isSegmented = segments.length > 1;
+
+  // Per-segment yesterday spend → used to show improving/worsening per segment row.
+  const segPrevSpendMap = {};
+  const _segPrevSeenGids = {};
+  for (const c of uniqueCampaigns(campaigns)) {
+    if (!c.prev_pacing) continue;
+    const label = c.budget_label || 'Primary';
+    if (!segPrevSpendMap[label]) { segPrevSpendMap[label] = 0; _segPrevSeenGids[label] = new Set(); }
+    const key = campaignKey(c);
+    if (!_segPrevSeenGids[label].has(key)) {
+      _segPrevSeenGids[label].add(key);
+      segPrevSpendMap[label] += c.prev_pacing.actual_spend || 0;
+    }
+  }
   const segBudgets  = {};
   for (const c of uniqueCampaigns(campaigns)) {
     const l = c.budget_label || 'Primary';
@@ -747,6 +761,10 @@ export default function AccountDashboard({ onPacingComplete }) {
                   {segments.map(s => {
                     const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
                     const segApplyNeeded = segNeedsApply(s);
+                    const prevSegSpend = segPrevSpendMap[s.name];
+                    const segPrevDelta = (prevSegSpend > 0 && s.monthly > 0)
+                      ? computePace(s.monthly, prevSegSpend, prevDaysIn, daysInMonth).deltaPct
+                      : null;
                     return (
                       <tr key={s.name}>
                         <td style={{ paddingLeft: 16 }}>
@@ -755,7 +773,12 @@ export default function AccountDashboard({ onPacingComplete }) {
                             <span style={{ fontWeight: 500 }}>{s.name}</span>
                           </div>
                         </td>
-                        <td><span className={`pill ${sp.status}`}>{fmtPct(sp.deltaPct)}</span></td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <span className={`pill ${sp.status}`}>{fmtPct(sp.deltaPct)}</span>
+                            <TrendBadge todayDelta={sp.deltaPct} prevDeltaPct={segPrevDelta} />
+                          </div>
+                        </td>
                         <td>{fmt(s.spend)}</td>
                         <td>{fmt(s.monthly)}</td>
                         <td>{fmt(s.currentDaily)}</td>
@@ -811,11 +834,18 @@ export default function AccountDashboard({ onPacingComplete }) {
                   return [
                     <tr key={`seg-header-${label}`} style={{ background: 'var(--surface-2, #f5f6f8)', pointerEvents: 'none' }}>
                       <td colSpan={5} style={{ padding: '7px 12px', fontWeight: 700, fontSize: 'var(--t-sm)', color: 'var(--ink-2)', letterSpacing: '0.02em' }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                           {label}
                           {seg && segPace && (
                             <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 'var(--t-xs)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                               {fmt(seg.spend)} MTD · {fmt(seg.monthly)} budget · <span className={`pill ${segPace.status}`}>{fmtPct(segPace.deltaPct)}</span>
+                              {(() => {
+                                const prevSp = segPrevSpendMap[label];
+                                const prevD = (prevSp > 0 && seg.monthly > 0)
+                                  ? computePace(seg.monthly, prevSp, prevDaysIn, daysInMonth).deltaPct
+                                  : null;
+                                return <TrendBadge todayDelta={segPace.deltaPct} prevDeltaPct={prevD} />;
+                              })()}
                             </span>
                           )}
                         </span>
