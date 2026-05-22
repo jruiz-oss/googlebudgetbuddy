@@ -559,7 +559,14 @@ export default function AccountDashboard({ onPacingComplete }) {
 
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
         applyOptimisticUpdate(adjustments);
-        toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
+        const { applied = [], errors = [] } = r.data;
+        if (errors.length > 0 && applied.length === 0) {
+          toast.error(`All ${errors.length} budget update(s) failed — check Google Ads connection`);
+        } else if (errors.length > 0) {
+          toast.error(`${applied.length} updated, ${errors.length} failed — some budgets did not push`);
+        } else {
+          toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
+        }
       }
       load();
     } catch (e) {
