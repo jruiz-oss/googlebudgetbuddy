@@ -830,7 +830,7 @@ def apply_recommendations(account_id):
                 account.google_customer_id,
                 budget_resource,
                 new_daily,
-                mcc_customer_id=account.mcc_customer_id,
+                mcc_customer_id=_effective_mcc_customer_id(account),
             )
         except GoogleAdsError as e:
             logger.error('Budget update failed for campaign %s: %s', campaign_id, e)
