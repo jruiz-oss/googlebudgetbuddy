@@ -46,6 +46,10 @@ function campaignKey(c) {
   const digits = String(c.google_campaign_id || '').replace(/\D/g, '');
   return digits || `db:${c.id}`;
 }
+function normLabel(label) {
+  return (label || 'Primary').trim().toLowerCase();
+}
+
 function uniqueCampaigns(campaigns) {
   const byKey = new Map();
   for (const c of campaigns || []) {
@@ -78,13 +82,14 @@ function getSegments(account) {
   const seenGids = new Set();
   for (const c of uniqueCampaigns(campaigns)) {
     if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
-    const label = c.budget_label || 'Primary';
-    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0 };
-    map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
+    const rawLabel = c.budget_label || 'Primary';
+    const labelKey = normLabel(rawLabel);
+    if (!map[labelKey]) map[labelKey] = { name: rawLabel, monthly: 0, spend: 0 };
+    map[labelKey].monthly = Math.max(map[labelKey].monthly, c.monthly_budget || 0);
     const key = campaignKey(c);
     if (!seenGids.has(key)) {
       seenGids.add(key);
-      map[label].spend += c.latest_pacing?.actual_spend || 0;
+      map[labelKey].spend += c.latest_pacing?.actual_spend || 0;
     }
   }
   return Object.values(map);
@@ -111,8 +116,8 @@ function accountPrevPacing(account, daysIn, daysInMonth) {
 
   const segBudgets = {};
   for (const c of campaigns) {
-    const label = c.budget_label || 'Primary';
-    segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
+    const l = normLabel(c.budget_label);
+    segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
   const monthly = typeof account.total_monthly_budget === 'number'
     ? account.total_monthly_budget
@@ -149,8 +154,8 @@ function accountPacing(account, daysIn, daysInMonth) {
   const campaigns = account.campaigns || [];
   const segBudgets = {};
   for (const c of uniqueCampaigns(campaigns)) {
-    const label = c.budget_label || 'Primary';
-    segBudgets[label] = Math.max(segBudgets[label] || 0, c.monthly_budget || 0);
+    const l = normLabel(c.budget_label);
+    segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
   const monthly = typeof account.total_monthly_budget === 'number'
     ? account.total_monthly_budget

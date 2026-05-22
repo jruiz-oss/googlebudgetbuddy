@@ -47,6 +47,13 @@ function statusLabel(c) {
   if (gs === 'REMOVED') return 'Ended';
   return c.is_active ? 'Live' : 'Inactive w/ spend';
 }
+// Normalise a budget_label to a case-insensitive key.
+// "aquatopia" and "Aquatopia" in the DB (pre-sheet-sync inconsistency) should
+// be treated as the same segment on initial load.
+function normLabel(label) {
+  return (label || 'Primary').trim().toLowerCase();
+}
+
 function uniqueCampaigns(campaigns) {
   const byKey = new Map();
   for (const c of campaigns || []) {
@@ -121,21 +128,24 @@ function getSegments(account, campaigns) {
   const map = {};
   const seenGids = new Set();
   for (const c of uniqueCampaigns(campaigns)) {
-    const label = c.budget_label || 'Primary';
-    if (!map[label]) map[label] = { name: label, monthly: 0, spend: 0, currentDaily: 0, campaignCount: 0 };
+    const rawLabel = c.budget_label || 'Primary';
+    // Use a lowercase key so "aquatopia" and "Aquatopia" collapse into the
+    // same segment before pacing re-syncs consistent labels from the sheet.
+    const labelKey = normLabel(rawLabel);
+    if (!map[labelKey]) map[labelKey] = { name: rawLabel, monthly: 0, spend: 0, currentDaily: 0, campaignCount: 0 };
     // Use max so an inactive campaign (monthly_budget=0) doesn't hide the
     // correct budget that an active campaign in the same segment carries.
-    map[label].monthly = Math.max(map[label].monthly, c.monthly_budget || 0);
+    map[labelKey].monthly = Math.max(map[labelKey].monthly, c.monthly_budget || 0);
     // Only add spend once per unique Google campaign ID.
     if (
       (!mostRecentDate || c.latest_pacing?.date === mostRecentDate) &&
       !seenGids.has(campaignKey(c))
     ) {
       seenGids.add(campaignKey(c));
-      map[label].spend += c.latest_pacing?.actual_spend || 0;
+      map[labelKey].spend += c.latest_pacing?.actual_spend || 0;
     }
-    map[label].currentDaily += currentDaily(c);
-    map[label].campaignCount += 1;
+    map[labelKey].currentDaily += currentDaily(c);
+    map[labelKey].campaignCount += 1;
   }
   return Object.values(map);
 }
@@ -502,7 +512,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             }))
           : item.segments.flatMap(s => {
               const sp = computePace(s.monthly, s.spend, di, dim);
-              const segCampaigns = campaigns.filter(c => (c.budget_label || 'Primary') === s.name);
+              const segCampaigns = campaigns.filter(c => normLabel(c.budget_label) === normLabel(s.name));
               return allocateByCurrentShare(segCampaigns, sp.dailyRec);
             });
         if (!adjustments.length) {
@@ -516,11 +526,11 @@ export default function AccountDashboard({ onPacingComplete }) {
         // Single-budget or per-segment apply.
         // item.segmentOf is set when this is a per-segment row; item.name is the segment label.
         // For single-budget accounts item.segmentOf is undefined — use all campaigns.
-        const segLabel = item.segmentOf ? item.name : null;
+        const segLabel = item.segmentOf ? normLabel(item.name) : null;
         const eligible = uniqueCampaigns(campaigns).filter(c =>
           c.budget_resource_name &&
           c.is_active &&  // only push budget to ENABLED campaigns — paused ones won't spend
-          (segLabel === null || (c.budget_label || 'Primary') === segLabel)
+          (segLabel === null || normLabel(c.budget_label) === segLabel)
         );
 
         if (!eligible.length) {
@@ -584,7 +594,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   const _segPrevSeenGids = {};
   for (const c of uniqueCampaigns(campaigns)) {
     if (!c.prev_pacing) continue;
-    const label = c.budget_label || 'Primary';
+    const label = normLabel(c.budget_label);
     if (!segPrevSpendMap[label]) { segPrevSpendMap[label] = 0; _segPrevSeenGids[label] = new Set(); }
     const key = campaignKey(c);
     if (!_segPrevSeenGids[label].has(key)) {
@@ -594,7 +604,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   }
   const segBudgets  = {};
   for (const c of uniqueCampaigns(campaigns)) {
-    const l = c.budget_label || 'Primary';
+    const l = normLabel(c.budget_label);
     segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
   }
   const monthly = typeof account.total_monthly_budget === 'number'
@@ -761,7 +771,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                   {segments.map(s => {
                     const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
                     const segApplyNeeded = segNeedsApply(s);
-                    const prevSegSpend = segPrevSpendMap[s.name];
+                    const prevSegSpend = segPrevSpendMap[normLabel(s.name)];
                     const segPrevDelta = (prevSegSpend > 0 && s.monthly > 0)
                       ? computePace(s.monthly, prevSegSpend, prevDaysIn, daysInMonth).deltaPct
                       : null;
@@ -807,10 +817,12 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Live Campaigns</div>
         {isSegmented ? (() => {
           // Group campaigns by segment label, preserving segment order from the segments array.
-          const segOrder = segments.map(s => s.name);
+          // Use normLabel keys so "aquatopia" and "Aquatopia" both land in the
+          // same group as the corresponding segment row.
+          const segOrder = segments.map(s => normLabel(s.name));
           const grouped = {};
           for (const c of uniqueCampaigns(campaigns)) {
-            const label = c.budget_label || 'Primary';
+            const label = normLabel(c.budget_label);
             if (!grouped[label]) grouped[label] = [];
             grouped[label].push(c);
           }
@@ -825,7 +837,7 @@ export default function AccountDashboard({ onPacingComplete }) {
               </thead>
               <tbody>
                 {allLabels.map(label => {
-                  const seg = segments.find(s => s.name === label);
+                  const seg = segments.find(s => normLabel(s.name) === label);
                   const cams = grouped[label] || [];
                   if (!cams.length) return null;
                   // Share is within-segment so each campaign's % is relative to its segment total.
@@ -835,12 +847,12 @@ export default function AccountDashboard({ onPacingComplete }) {
                     <tr key={`seg-header-${label}`} style={{ background: 'var(--surface-2, #f5f6f8)', pointerEvents: 'none' }}>
                       <td colSpan={5} style={{ padding: '7px 12px', fontWeight: 700, fontSize: 'var(--t-sm)', color: 'var(--ink-2)', letterSpacing: '0.02em' }}>
                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          {label}
+                          {seg?.name || label}
                           {seg && segPace && (
                             <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 'var(--t-xs)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                               {fmt(seg.spend)} MTD · {fmt(seg.monthly)} budget · <span className={`pill ${segPace.status}`}>{fmtPct(segPace.deltaPct)}</span>
                               {(() => {
-                                const prevSp = segPrevSpendMap[label];
+                                const prevSp = segPrevSpendMap[label]; // label is already normLabel
                                 const prevD = (prevSp > 0 && seg.monthly > 0)
                                   ? computePace(seg.monthly, prevSp, prevDaysIn, daysInMonth).deltaPct
                                   : null;

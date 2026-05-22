@@ -191,14 +191,19 @@ def segment_spend_summaries(campaigns):
     seen_spend = set()
 
     for campaign in campaigns or []:
-        label = campaign.budget_label or 'Primary'
-        row = summaries.setdefault(label, {
-            'name': label,
-            'monthly': 0.0,
-            'spend': 0.0,
-            'current_daily': 0.0,
-            'campaign_count': 0,
-        })
+        label = (campaign.budget_label or 'Primary').strip()
+        # Normalise to lowercase so "aquatopia" and "Aquatopia" collapse into
+        # one segment on initial load (before pacing re-syncs the sheet).
+        label_key = label.lower()
+        if label_key not in summaries:
+            summaries[label_key] = {
+                'name': label,
+                'monthly': 0.0,
+                'spend': 0.0,
+                'current_daily': 0.0,
+                'campaign_count': 0,
+            }
+        row = summaries[label_key]
         row['monthly'] = max(row['monthly'], campaign.monthly_budget or 0.0)
         row['current_daily'] += campaign.current_daily_budget or 0.0
         row['campaign_count'] += 1
