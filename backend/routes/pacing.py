@@ -64,11 +64,17 @@ def _month_bounds(today):
 
 
 def _compute_recommendation(monthly_budget, actual_spend, current_daily, today):
-    """Return (recommended_daily, status, pace_ratio, expected_mtd, daily_target)."""
+    """Return (recommended_daily, status, pace_ratio, expected_mtd, daily_target).
+
+    days_elapsed is based on yesterday (the last full day for which Google Ads
+    has closed spend data). today is still the real calendar date so that
+    days_remaining correctly includes today as a spending day.
+    """
     month_start, month_end = _month_bounds(today)
-    days_in_month = (month_end - month_start).days + 1
-    days_elapsed = (today - month_start).days + 1
-    days_remaining = (month_end - today).days + 1
+    days_in_month  = (month_end - month_start).days + 1
+    data_through   = today - timedelta(days=1)          # EOD of yesterday
+    days_elapsed   = max((data_through - month_start).days + 1, 1)
+    days_remaining = (month_end - today).days + 1       # today counts as a remaining day
 
     daily_target = monthly_budget / days_in_month if days_in_month else 0
     expected_mtd = daily_target * days_elapsed
@@ -354,8 +360,9 @@ def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
 
     month_start, month_end = _month_bounds(today)
     days_in_month  = (month_end - month_start).days + 1
-    days_elapsed   = (today - month_start).days + 1
-    days_remaining = (month_end - today).days + 1
+    data_through   = today - timedelta(days=1)          # EOD of yesterday
+    days_elapsed   = max((data_through - month_start).days + 1, 1)
+    days_remaining = (month_end - today).days + 1       # today counts as a remaining day
     effective_mcc_id = _effective_mcc_customer_id(account)
 
     db_campaigns = canonical_campaigns(account.campaigns)

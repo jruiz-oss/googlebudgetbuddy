@@ -375,7 +375,7 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       <div className="cell">
         <div className="k">Accounts</div>
         <div className="v">{accounts.length}</div>
-        <div className="sub">day {daysIn} / {daysInMonth} · {daysInMonth - daysIn} days left</div>
+        <div className="sub">day {daysIn + 1} / {daysInMonth} · {daysInMonth - daysIn} days left</div>
       </div>
       <div className="cell">
         <div className="k">Portfolio pace</div>

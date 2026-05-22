@@ -243,7 +243,7 @@ function CumulativeLineChart({ monthly, spend, daysIn, daysInMonth, accountId })
         <line x1={padL} y1={yFn(monthly)} x2={W - padR} y2={yFn(monthly)} stroke="var(--ink)" strokeWidth="1" strokeDasharray="4 4" opacity="0.6" />
         <text x={W - padR} y={yFn(monthly) - 5} fontSize="10.5" textAnchor="end" fill="var(--ink-2)" fontFamily="Inter" fontWeight="500">Monthly cap · {fmt(monthly)}</text>
         <line x1={xFn(daysIn - 1)} y1={padT} x2={xFn(daysIn - 1)} y2={padT + innerH} stroke="var(--ink)" strokeWidth="1" strokeDasharray="3 3" opacity="0.35" />
-        <text x={xFn(daysIn - 1) + 6} y={padT + 12} fontSize="10.5" fill="var(--ink-2)" fontFamily="Inter" fontWeight="500">Today · d{daysIn}</text>
+        <text x={xFn(daysIn - 1) + 6} y={padT + 12} fontSize="10.5" fill="var(--ink-2)" fontFamily="Inter" fontWeight="500">Thru d{daysIn}</text>
         <path d={`M ${xFn(0)} ${yFn(0)} L ${xFn(DIM - 1)} ${yFn(monthly)}`} stroke="var(--ink)" strokeWidth="1.6" fill="none" />
         <path d={areaPath} fill={`url(#${gradId})`} />
         <path d={`M ${xFn(daysIn - 1)} ${yFn(lastCum)} L ${xFn(DIM - 1)} ${yFn(monthly)}`} stroke="var(--green)" strokeWidth="2" fill="none" strokeDasharray="5 4" strokeLinecap="round" />
@@ -294,15 +294,18 @@ function ApplyModal({ item, onClose, onConfirm }) {
   const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
   // Use backend-computed rec if passed (item.rec), otherwise fall back to frontend calc.
   const newDaily = item.rec != null ? item.rec : pace.dailyRec;
-  const diff = Math.abs(newDaily - pace.dailyCurrent);
-  const dir  = newDaily > pace.dailyCurrent ? 'increase' : 'decrease';
+  // Prefer the actual stored Google Ads daily budget (item.currentDaily) over the
+  // formula-derived average (spend / daysIn) so the modal matches the segments table.
+  const shownCurrent = item.currentDaily != null ? item.currentDaily : pace.dailyCurrent;
+  const diff = Math.abs(newDaily - shownCurrent);
+  const dir  = newDaily > shownCurrent ? 'increase' : 'decrease';
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h3>Apply recommended daily budget</h3>
         <div className="subtle">{item.segmentOf ? `${item.name} · segment of ${item.segmentOf}` : item.name}</div>
         <div className="diff-card">
-          <div className="dcol from"><div className="dk">Current daily</div><div className="dv">{fmt(pace.dailyCurrent)}</div></div>
+          <div className="dcol from"><div className="dk">Current daily</div><div className="dv">{fmt(shownCurrent)}</div></div>
           <div className="darrow"><ArrowRight size={14} /></div>
           <div className="dcol"><div className="dk">New daily</div><div className="dv" style={{ color: 'var(--green)' }}>{fmt(newDaily)}</div></div>
         </div>
@@ -687,7 +690,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             <span style={{ color: 'var(--line-2)' }}>·</span>
             monthly {fmt(monthly)}
             <span style={{ color: 'var(--line-2)' }}>·</span>
-            day {daysIn} of {daysInMonth}
+            day {daysIn + 1} of {daysInMonth}
             <span style={{ color: 'var(--line-2)' }}>·</span>
             <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
             <TrendBadge todayDelta={pace.deltaPct} prevDeltaPct={prevDeltaPct} inline />
@@ -723,7 +726,7 @@ export default function AccountDashboard({ onPacingComplete }) {
         <div>
           <div className="panel">
             <div className="panel-head">
-              <div><h3>Pace vs projection</h3><div className="ph-desc">Cumulative spend against ideal — today is d{daysIn}</div></div>
+              <div><h3>Pace vs projection</h3><div className="ph-desc">Cumulative spend against ideal — data thru d{daysIn} (EOD yesterday)</div></div>
               <span className="sync-label">last sync · {lastSyncStr}</span>
             </div>
             <CumulativeLineChart monthly={monthly} spend={spend} daysIn={daysIn} daysInMonth={daysInMonth} accountId={account.id} />
@@ -795,7 +798,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                         <td className="seg-rec">{fmt(sp.dailyRec)}</td>
                         <td style={{ paddingRight: 16, textAlign: 'right' }}>
                           {segApplyNeeded
-                            ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, segmentOf: account.account_name })}>Apply</button>
+                            ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, currentDaily: s.currentDaily, segmentOf: account.account_name })}>Apply</button>
                             : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓</span>
                           }
                         </td>
