@@ -397,6 +397,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   const [capOn, setCapOn]           = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [applyItem, setApplyItem]   = useState(null);
+  const [appliedSegs, setAppliedSegs] = useState(new Set());
   const [lastSync, setLastSync]     = useState(null);
   const [sheetSync, setSheetSync]   = useState(null);
   const [sheetWrite, setSheetWrite] = useState(null);
@@ -568,6 +569,9 @@ export default function AccountDashboard({ onPacingComplete }) {
           toast.error(`${applied.length} updated, ${errors.length} failed: ${reason}`);
         } else {
           toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
+          if (item.segmentOf) {
+            setAppliedSegs(prev => new Set([...prev, normLabel(item.name)]));
+          }
         }
       }
       load();
@@ -806,9 +810,11 @@ export default function AccountDashboard({ onPacingComplete }) {
                         <td>{fmt(s.currentDaily)}</td>
                         <td className="seg-rec">{fmt(sp.dailyRec)}</td>
                         <td style={{ paddingRight: 16, textAlign: 'right' }}>
-                          {segApplyNeeded
-                            ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, currentDaily: s.currentDaily, segmentOf: account.account_name })}>Apply</button>
-                            : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓</span>
+                          {appliedSegs.has(normLabel(s.name))
+                            ? <span style={{ fontSize: 'var(--t-sm)', color: 'var(--green)' }}>✓ Applied</span>
+                            : segApplyNeeded
+                              ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, currentDaily: s.currentDaily, segmentOf: account.account_name })}>Apply</button>
+                              : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓</span>
                           }
                         </td>
                       </tr>
