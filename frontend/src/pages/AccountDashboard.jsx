@@ -561,9 +561,11 @@ export default function AccountDashboard({ onPacingComplete }) {
         applyOptimisticUpdate(adjustments);
         const { applied = [], errors = [] } = r.data;
         if (errors.length > 0 && applied.length === 0) {
-          toast.error(`All ${errors.length} budget update(s) failed — check Google Ads connection`);
+          const reason = errors[0]?.error || 'unknown error';
+          toast.error(`All ${errors.length} failed: ${reason}`);
         } else if (errors.length > 0) {
-          toast.error(`${applied.length} updated, ${errors.length} failed — some budgets did not push`);
+          const reason = errors[0]?.error || 'unknown error';
+          toast.error(`${applied.length} updated, ${errors.length} failed: ${reason}`);
         } else {
           toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
         }
