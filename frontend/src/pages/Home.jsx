@@ -536,6 +536,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   const [accounts, setAccounts]   = useState(propAccounts || []);
   const [loading, setLoading]     = useState(!propAccounts?.length);
   const [runningAll, setRunningAll] = useState(false);
+  const [paceProgress, setPaceProgress] = useState({ completed: 0, total: 0 });
   const [showAdd, setShowAdd]     = useState(false);
   const [showMcc, setShowMcc]     = useState(false);
   const [capStates, setCapStates] = useState({});
@@ -569,30 +570,29 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
 
   const runAllPacing = async () => {
     setRunningAll(true);
-    toast.info(`Kicking off pacing for ${accounts.length} account(s)…`);
+    setPaceProgress({ completed: 0, total: accounts.length });
     try {
       await axios.post('/api/pacing/run-all');
       // Backend returns 202 immediately — actual pacing runs in a background thread.
-      // Poll /run-all/status every 10s so we reload the moment it finishes
-      // rather than guessing with a fixed timeout.
-      toast.info('Pacing in progress — dashboard will update automatically when done.');
+      // Poll /run-all/status every 5s to keep the counter live.
       let elapsed = 0;
       const MAX_WAIT_MS = 5 * 60 * 1000; // 5 min safety cap
-      const POLL_MS = 10000;
+      const POLL_MS = 5000;
       const pollId = setInterval(async () => {
         elapsed += POLL_MS;
         try {
           const { data } = await axios.get('/api/pacing/run-all/status');
+          if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
           if (!data.running) {
             clearInterval(pollId);
             setRunningAll(false);
-            load();
+            await load();
             onAccountsChange?.();
             toast.success('Pacing complete — data updated!');
           } else if (elapsed >= MAX_WAIT_MS) {
             clearInterval(pollId);
             setRunningAll(false);
-            load();
+            await load();
             onAccountsChange?.();
             toast.warn('Pacing is taking longer than expected — refreshed anyway.');
           }
@@ -600,7 +600,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
           // If the status check itself fails, stop polling and reload.
           clearInterval(pollId);
           setRunningAll(false);
-          load();
+          await load();
         }
       }, POLL_MS);
     } catch (e) {
@@ -609,15 +609,16 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
         // Still poll so the button re-enables and data refreshes when done.
         let elapsed = 0;
         const MAX_WAIT_MS = 5 * 60 * 1000;
-        const POLL_MS = 10000;
+        const POLL_MS = 5000;
         const pollId = setInterval(async () => {
           elapsed += POLL_MS;
           try {
             const { data } = await axios.get('/api/pacing/run-all/status');
+            if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
             if (!data.running || elapsed >= MAX_WAIT_MS) {
               clearInterval(pollId);
               setRunningAll(false);
-              load();
+              await load();
               onAccountsChange?.();
             }
           } catch {
@@ -746,7 +747,12 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
           <CloudDownload size={13} /> Import MCC
         </button>
         <button className="btn small" onClick={runAllPacing} disabled={runningAll || !accounts.length}>
-          <Play size={13} /> {runningAll ? 'Running…' : 'Run All Pacing'}
+          <Play size={13} />
+          {runningAll
+            ? paceProgress.total > 0
+              ? `${paceProgress.completed}/${paceProgress.total} paced…`
+              : 'Starting…'
+            : 'Run All Pacing'}
         </button>
         <button className="btn small" onClick={() => setShowAdd(true)}>
           <Plus size={13} /> Add Account

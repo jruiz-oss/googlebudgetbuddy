@@ -446,16 +446,9 @@ export default function AccountDashboard({ onPacingComplete }) {
       if (r.data.auto_pause_warning) toast.warn(r.data.auto_pause_warning.message);
       toast.success('Pacing run complete');
       onPacingComplete?.();
-      // Silently reload the campaign list so visible_latest_campaigns re-runs with
-      // today as the new latest_date. Before the first pacing run of the day,
-      // latest_date was a prior date — any campaign that spent on that date appeared
-      // visible even if it ended last month. Now that today's run is committed the
-      // backend will exclude those zombies. No loading spinner needed: mergeRecs
-      // already applied the fresh spend/rec numbers.
-      try {
-        const campR = await axios.get(`/api/campaigns/account/${id}`);
-        setCampaigns(campR.data.campaigns || []);
-      } catch { /* best-effort — mergeRecs data is still shown if this fails */ }
+      // Full reload: re-fetch both account summary and campaigns so header stats
+      // (MTD spend, budget, segments) reflect the just-completed run immediately.
+      await load();
     } catch (e) { toast.error(e.response?.data?.error || 'Pacing run failed'); }
     finally { setRunning(false); }
   };

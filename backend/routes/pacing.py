@@ -48,6 +48,9 @@ pacing_bp = Blueprint('pacing', __name__, url_prefix='/api/pacing')
 # acquire(blocking=False) in the route; released at end of background worker.
 _pacing_all_lock = threading.Lock()
 
+# Live progress counters — written by the background worker, read by /run-all/status.
+_pacing_all_progress = {'completed': 0, 'total': 0}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -932,6 +935,8 @@ def _run_pacing_all_job(app, refresh_token_str):
             # commit and leaves the bulk-loaded objects stale).
             account_ids = [row[0] for row in db.session.query(Account.id).all()]
 
+            _pacing_all_progress['total'] = len(account_ids)
+            _pacing_all_progress['completed'] = 0
             logger.info('run-all background: processing %d account(s)', len(account_ids))
 
             for account_id in account_ids:
@@ -980,6 +985,8 @@ def _run_pacing_all_job(app, refresh_token_str):
 
                 except Exception as e:
                     logger.error('run-all background: pacing failed for account %s: %s', account_id, e)
+                finally:
+                    _pacing_all_progress['completed'] += 1
 
             logger.info('run-all background: completed all accounts')
 
@@ -1035,7 +1042,11 @@ def run_all_status():
     if not running:
         # We acquired the lock just to check — release it immediately.
         _pacing_all_lock.release()
-    return jsonify({'running': running})
+    return jsonify({
+        'running': running,
+        'completed': _pacing_all_progress['completed'],
+        'total': _pacing_all_progress['total'],
+    })
 
 
 # ---------------------------------------------------------------------------
