@@ -250,7 +250,7 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
     return added, updated
 
 
-def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
+def _run_mcc_sync_job(app, refresh_token_str, mcc_id, skip_pacing=False):
     """Full MCC sync — runs in a background thread with its own Flask app context.
 
     Releases _mcc_sync_lock when done so a subsequent sync can proceed.
@@ -392,8 +392,11 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id):
 
             # Run pacing for all surviving accounts so the home dashboard
             # shows real MTD spend immediately after a sync (not 0/0).
+            # skip_pacing=True is used when the caller will separately trigger
+            # run-all (e.g. the combined Sync & Pace button on the home page),
+            # avoiding two concurrent pacing jobs writing to the same DB rows.
             pacing_run_count = 0
-            if kept_accounts:
+            if kept_accounts and not skip_pacing:
                 try:
                     from routes.pacing import run_pacing_for_account
                     logger.info('MCC sync: running pacing for %d accounts', len(kept_accounts))
@@ -449,6 +452,10 @@ def sync_from_mcc():
 
     data = request.get_json() or {}
     mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
+    # skip_pacing=True means the caller will trigger run-all separately for pacing.
+    # This avoids two concurrent pacing jobs when the home-page "Sync & Pace" button
+    # calls sync-from-mcc (campaign discovery) then immediately calls run-all.
+    skip_pacing = bool(data.get('skip_pacing', False))
 
     # Prevent concurrent syncs — if lock is already held return 409
     if not _mcc_sync_lock.acquire(blocking=False):
@@ -460,6 +467,7 @@ def sync_from_mcc():
     t = threading.Thread(
         target=_run_mcc_sync_job,
         args=(app, refresh_token_str, mcc_id),
+        kwargs={'skip_pacing': skip_pacing},
         daemon=True,
     )
     t.start()

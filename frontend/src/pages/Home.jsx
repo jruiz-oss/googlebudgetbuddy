@@ -536,6 +536,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   const [accounts, setAccounts]   = useState(propAccounts || []);
   const [loading, setLoading]     = useState(!propAccounts?.length);
   const [runningAll, setRunningAll] = useState(false);
+  const [syncPhase, setSyncPhase]   = useState(false); // true while campaign sync is running
   const [paceProgress, setPaceProgress] = useState({ completed: 0, total: 0 });
   const [showAdd, setShowAdd]     = useState(false);
   const [showMcc, setShowMcc]     = useState(false);
@@ -566,68 +567,78 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     finally { setLoading(false); }
   };
 
-  useEffect(() => { if (!propAccounts?.length) load(); }, []);
+  // Always load fresh on mount — propAccounts from App.jsx can be stale if the
+  // user ran pacing on an individual account then navigated back to the home page.
+  useEffect(() => { load(); }, []);
+
+  // Poll /run-all/status until pacing completes, then reload.
+  const _pollPacingProgress = () => {
+    let elapsed = 0;
+    const MAX_WAIT_MS = 5 * 60 * 1000;
+    const POLL_MS = 5000;
+    const pollId = setInterval(async () => {
+      elapsed += POLL_MS;
+      try {
+        const { data } = await axios.get('/api/pacing/run-all/status');
+        if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
+        if (!data.running) {
+          clearInterval(pollId);
+          setSyncPhase(false);
+          setRunningAll(false);
+          await load();
+          onAccountsChange?.();
+          toast.success('Sync & pacing complete — data updated!');
+        } else if (elapsed >= MAX_WAIT_MS) {
+          clearInterval(pollId);
+          setSyncPhase(false);
+          setRunningAll(false);
+          await load();
+          onAccountsChange?.();
+          toast.warn('Pacing is taking longer than expected — refreshed anyway.');
+        }
+      } catch {
+        clearInterval(pollId);
+        setSyncPhase(false);
+        setRunningAll(false);
+        await load();
+      }
+    }, POLL_MS);
+  };
 
   const runAllPacing = async () => {
     setRunningAll(true);
+    setSyncPhase(true);
     setPaceProgress({ completed: 0, total: accounts.length });
+
+    // Step 1: Fire campaign sync from MCC (skip_pacing=true so it doesn't
+    // also run pacing — we handle pacing below with progress tracking).
+    // This is fire-and-forget; we don't wait for it to complete because the
+    // campaign-sync phase is fast and the pacing step below runs after it.
+    try {
+      await axios.post('/api/accounts/sync-from-mcc', { skip_pacing: true });
+    } catch (e) {
+      // 409 = already syncing (fine, continue to pacing).
+      // Any other error we log and continue — campaign sync failure shouldn't
+      // block pacing; worst case we pace with the existing campaign list.
+      if (e.response?.status !== 409) {
+        console.warn('Campaign sync skipped:', e.response?.data?.error || e.message);
+      }
+    }
+
+    // Small buffer to let campaign-sync DB writes land before pacing reads them.
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    setSyncPhase(false);
+
+    // Step 2: Run pacing for all accounts (includes sheet budget sync) and poll progress.
     try {
       await axios.post('/api/pacing/run-all');
-      // Backend returns 202 immediately — actual pacing runs in a background thread.
-      // Poll /run-all/status every 5s to keep the counter live.
-      let elapsed = 0;
-      const MAX_WAIT_MS = 5 * 60 * 1000; // 5 min safety cap
-      const POLL_MS = 5000;
-      const pollId = setInterval(async () => {
-        elapsed += POLL_MS;
-        try {
-          const { data } = await axios.get('/api/pacing/run-all/status');
-          if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
-          if (!data.running) {
-            clearInterval(pollId);
-            setRunningAll(false);
-            await load();
-            onAccountsChange?.();
-            toast.success('Pacing complete — data updated!');
-          } else if (elapsed >= MAX_WAIT_MS) {
-            clearInterval(pollId);
-            setRunningAll(false);
-            await load();
-            onAccountsChange?.();
-            toast.warn('Pacing is taking longer than expected — refreshed anyway.');
-          }
-        } catch {
-          // If the status check itself fails, stop polling and reload.
-          clearInterval(pollId);
-          setRunningAll(false);
-          await load();
-        }
-      }, POLL_MS);
+      _pollPacingProgress();
     } catch (e) {
       if (e.response?.status === 409) {
         toast.warn('Pacing already in progress — dashboard will update when it finishes.');
-        // Still poll so the button re-enables and data refreshes when done.
-        let elapsed = 0;
-        const MAX_WAIT_MS = 5 * 60 * 1000;
-        const POLL_MS = 5000;
-        const pollId = setInterval(async () => {
-          elapsed += POLL_MS;
-          try {
-            const { data } = await axios.get('/api/pacing/run-all/status');
-            if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
-            if (!data.running || elapsed >= MAX_WAIT_MS) {
-              clearInterval(pollId);
-              setRunningAll(false);
-              await load();
-              onAccountsChange?.();
-            }
-          } catch {
-            clearInterval(pollId);
-            setRunningAll(false);
-          }
-        }, POLL_MS);
+        _pollPacingProgress(); // still poll so button re-enables
       } else {
-        toast.error(e.response?.data?.error || 'Run all pacing failed');
+        toast.error(e.response?.data?.error || 'Pacing failed');
         setRunningAll(false);
       }
     }
@@ -746,13 +757,15 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
         <button className="btn ghost small" onClick={() => setShowMcc(true)}>
           <CloudDownload size={13} /> Import MCC
         </button>
-        <button className="btn small" onClick={runAllPacing} disabled={runningAll || !accounts.length}>
+        <button className="btn small" onClick={runAllPacing} disabled={runningAll}>
           <Play size={13} />
           {runningAll
-            ? paceProgress.total > 0
-              ? `${paceProgress.completed}/${paceProgress.total} paced…`
-              : 'Starting…'
-            : 'Run All Pacing'}
+            ? syncPhase
+              ? 'Syncing campaigns…'
+              : paceProgress.total > 0
+                ? `${paceProgress.completed}/${paceProgress.total} paced…`
+                : 'Starting pacing…'
+            : 'Sync & Pace All'}
         </button>
         <button className="btn small" onClick={() => setShowAdd(true)}>
           <Plus size={13} /> Add Account

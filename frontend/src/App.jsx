@@ -1,7 +1,7 @@
 import { useState, useEffect, createContext, useContext } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import axios from 'axios';
-import { ToastProvider, useToast } from './components/Toast';
+import { ToastProvider } from './components/Toast';
 import Sidebar from './components/Sidebar';
 import Home from './pages/Home';
 import AccountDashboard from './pages/AccountDashboard';
@@ -68,7 +68,7 @@ function DayLabel() {
 }
 
 // ── Topbar ─────────────────────────────────────────────────────────────────
-function Topbar({ onSync, syncing, accounts }) {
+function Topbar({ accounts }) {
   const location    = useLocation();
   const accountMatch = location.pathname.match(/^\/accounts\/(\d+)/);
   const accountId   = accountMatch?.[1];
@@ -96,24 +96,18 @@ function Topbar({ onSync, syncing, accounts }) {
       </div>
       <div className="topbar-right">
         <span className="day-label">{DayLabel()}</span>
-        <button className="btn" onClick={onSync} disabled={syncing} style={{ gap: '6px' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38"/>
-          </svg>
-          {syncing ? 'Syncing…' : 'Sync'}
-        </button>
       </div>
     </div>
   );
 }
 
 // ── Layout wrapper ─────────────────────────────────────────────────────────
-function AppLayout({ children, accounts, onSync, syncing }) {
+function AppLayout({ children, accounts }) {
   return (
     <div className="shell">
       <Sidebar accounts={accounts} unreadCount={3} />
       <div className="main-col">
-        <Topbar onSync={onSync} syncing={syncing} accounts={accounts} />
+        <Topbar accounts={accounts} />
         <div className="page-content">{children}</div>
       </div>
     </div>
@@ -123,8 +117,6 @@ function AppLayout({ children, accounts, onSync, syncing }) {
 // ── Inner routes (need ToastProvider in scope) ─────────────────────────────
 function AppRoutes() {
   const [accounts, setAccounts] = useState([]);
-  const [syncing, setSyncing]   = useState(false);
-  const toast = useToast();
 
   const loadAccounts = async () => {
     try {
@@ -145,26 +137,8 @@ function AppRoutes() {
 
   useEffect(() => { loadAccounts(); }, []);
 
-  const handleSync = async () => {
-    setSyncing(true);
-    try {
-      const r = await axios.post('/api/accounts/sync-from-mcc', {});
-      if (r.status === 202) {
-        toast.info('Sync started — refreshing in 75 seconds…');
-        setTimeout(() => { loadAccounts(); setSyncing(false); }, 75000);
-      } else {
-        loadAccounts(); setSyncing(false);
-      }
-    } catch (e) {
-      const status = e.response?.status;
-      if (status === 409) toast.info(e.response?.data?.message || 'Sync already running');
-      else toast.error(e.response?.data?.error || 'Sync failed');
-      setSyncing(false);
-    }
-  };
-
   const wrap = (el) => (
-    <AppLayout accounts={accounts} onSync={handleSync} syncing={syncing}>
+    <AppLayout accounts={accounts}>
       {el}
     </AppLayout>
   );
