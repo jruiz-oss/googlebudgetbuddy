@@ -320,7 +320,7 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
           <span className="sk">MTD spend</span>
           <span className="sv">{fmt(spend)} <span className="smuted">/ {fmt(monthly)}</span></span>
           <span className="sk">Daily now</span>
-          <span className="sv">{fmt(pace.dailyCurrent)}</span>
+          <span className="sv">{fmt(currentDailyBudget)}</span>
           <span className="sk">Daily rec</span>
           <span className="sv rec">{fmt(pace.dailyRec)}</span>
         </div>
