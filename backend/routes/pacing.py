@@ -30,7 +30,7 @@ from sqlalchemy.orm import selectinload
 
 from database import (
     Account, AccountSettings, BudgetAdjustment, Campaign,
-    GoogleOAuthToken, PacingData, PacingRun, PauseEvent, db,
+    GoogleOAuthToken, JobState, PacingData, PacingRun, PauseEvent, db,
     campaign_identity_key, canonical_campaigns, dedupe_by_name,
     visible_latest_campaigns,
 )
@@ -44,12 +44,88 @@ logger = logging.getLogger(__name__)
 
 pacing_bp = Blueprint('pacing', __name__, url_prefix='/api/pacing')
 
-# Prevents concurrent run-all calls (double-click / retry storms).
-# acquire(blocking=False) in the route; released at end of background worker.
+# Key for the run-all job's row in the JobState table.
+# State is persisted in Postgres (not an in-memory lock) because the backend
+# runs under gunicorn with multiple workers: an in-memory lock only exists in
+# one process, so a status poll routed to another worker would falsely report
+# the job as finished. See database.JobState for the full rationale.
+RUN_ALL_JOB_KEY = 'run_all_pacing'
+
+# Same-process fast guard against a double-click racing before the DB row is
+# written. The DB is the source of truth across workers; this just narrows the
+# in-process window between the claim check and the commit.
 _pacing_all_lock = threading.Lock()
 
-# Live progress counters — written by the background worker, read by /run-all/status.
-_pacing_all_progress = {'completed': 0, 'total': 0}
+
+def _get_or_create_job_state(job_key):
+    """Fetch the JobState row for job_key, creating it on first use."""
+    state = JobState.query.filter_by(job_key=job_key).first()
+    if state is None:
+        state = JobState(job_key=job_key, is_running=False, completed=0, total=0)
+        db.session.add(state)
+        db.session.commit()
+    return state
+
+
+def _claim_run_all_job():
+    """Atomically claim the run-all job. Returns True if claimed, False if a
+    live (non-stale) run is already in progress.
+
+    Uses a row lock (SELECT ... FOR UPDATE on Postgres) so two workers can't
+    both claim the same job. A stale run (crashed worker, no heartbeat) is
+    reclaimable so the UI never gets permanently stuck on "in progress".
+    """
+    with _pacing_all_lock:
+        try:
+            _get_or_create_job_state(RUN_ALL_JOB_KEY)
+            # Re-fetch with a row lock for the claim decision.
+            query = JobState.query.filter_by(job_key=RUN_ALL_JOB_KEY)
+            try:
+                state = query.with_for_update().first()
+            except Exception:
+                # SQLite (local/dev) doesn't support FOR UPDATE — fall back.
+                state = query.first()
+
+            if state.is_running and not state.is_stale():
+                db.session.commit()  # release the row lock
+                return False
+
+            now = datetime.utcnow()
+            state.is_running = True
+            state.completed = 0
+            state.total = 0
+            state.started_at = now
+            state.heartbeat = now
+            state.finished_at = None
+            db.session.commit()
+            return True
+        except Exception:
+            db.session.rollback()
+            raise
+
+
+def _update_run_all_progress(completed=None, total=None):
+    """Update progress counters + heartbeat for the run-all job."""
+    state = JobState.query.filter_by(job_key=RUN_ALL_JOB_KEY).first()
+    if state is None:
+        return
+    if completed is not None:
+        state.completed = completed
+    if total is not None:
+        state.total = total
+    state.heartbeat = datetime.utcnow()
+    db.session.commit()
+
+
+def _finish_run_all_job():
+    """Mark the run-all job finished. Always called in the worker's finally."""
+    state = JobState.query.filter_by(job_key=RUN_ALL_JOB_KEY).first()
+    if state is None:
+        return
+    state.is_running = False
+    state.finished_at = datetime.utcnow()
+    state.heartbeat = datetime.utcnow()
+    db.session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -925,7 +1001,8 @@ def _run_pacing_all_job(app, refresh_token_str):
 
     Mirrors the scheduler's logic: sheet sync → MTD spend fetch → PacingData
     write → sheet spend writeback, one account at a time.
-    Releases _pacing_all_lock when done so a subsequent run-all can proceed.
+    Marks the JobState row finished when done (in the finally) so a subsequent
+    run-all can proceed and status polls from any worker see the truth.
     """
     try:
         with app.app_context():
@@ -935,8 +1012,8 @@ def _run_pacing_all_job(app, refresh_token_str):
             # commit and leaves the bulk-loaded objects stale).
             account_ids = [row[0] for row in db.session.query(Account.id).all()]
 
-            _pacing_all_progress['total'] = len(account_ids)
-            _pacing_all_progress['completed'] = 0
+            done = 0
+            _update_run_all_progress(completed=0, total=len(account_ids))
             logger.info('run-all background: processing %d account(s)', len(account_ids))
 
             for account_id in account_ids:
@@ -986,14 +1063,26 @@ def _run_pacing_all_job(app, refresh_token_str):
                 except Exception as e:
                     logger.error('run-all background: pacing failed for account %s: %s', account_id, e)
                 finally:
-                    _pacing_all_progress['completed'] += 1
+                    done += 1
+                    # Persist progress + heartbeat so status polls (on any
+                    # worker) advance and the stale-job guard stays satisfied.
+                    try:
+                        _update_run_all_progress(completed=done)
+                    except Exception:
+                        db.session.rollback()
 
             logger.info('run-all background: completed all accounts')
 
     except Exception as e:
         logger.error('run-all background: unexpected error: %s', e, exc_info=True)
     finally:
-        _pacing_all_lock.release()
+        # Always clear the running flag, even if the whole job blew up, so the
+        # UI never gets stuck on "in progress".
+        try:
+            with app.app_context():
+                _finish_run_all_job()
+        except Exception as e:
+            logger.error('run-all background: failed to mark job finished: %s', e, exc_info=True)
 
 
 @pacing_bp.route('/run-all', methods=['POST'])
@@ -1014,7 +1103,9 @@ def run_all_pacing():
     if not token:
         return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
 
-    if not _pacing_all_lock.acquire(blocking=False):
+    # Claim the job atomically in Postgres so concurrent workers / double-clicks
+    # can't both start it. A stale run (crashed worker) is reclaimable.
+    if not _claim_run_all_job():
         return jsonify({'message': 'Pacing already in progress — refresh in about a minute.'}), 409
 
     app = current_app._get_current_object()
@@ -1035,17 +1126,19 @@ def run_all_pacing():
 def run_all_status():
     """Return whether a run-all pacing job is currently in progress.
 
-    The frontend polls this after kicking off /run-all so it knows exactly
-    when to reload rather than guessing with a fixed timeout.
+    Reads from the shared JobState row in Postgres so every gunicorn worker
+    reports the same truth (an in-memory flag would be per-process and lie).
+    The frontend polls this after kicking off /run-all so it knows exactly when
+    to reload rather than guessing with a fixed timeout.
     """
-    running = not _pacing_all_lock.acquire(blocking=False)
-    if not running:
-        # We acquired the lock just to check — release it immediately.
-        _pacing_all_lock.release()
+    state = JobState.query.filter_by(job_key=RUN_ALL_JOB_KEY).first()
+    if state is None:
+        return jsonify({'running': False, 'completed': 0, 'total': 0})
+    payload = state.to_dict()
     return jsonify({
-        'running': running,
-        'completed': _pacing_all_progress['completed'],
-        'total': _pacing_all_progress['total'],
+        'running': payload['running'],
+        'completed': payload['completed'],
+        'total': payload['total'],
     })
 
 

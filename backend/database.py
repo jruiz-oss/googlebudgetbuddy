@@ -660,3 +660,55 @@ class AccountSettings(db.Model):
             'track_leads': bool(self.track_leads),
             'created_at': self.created_at.isoformat(),
         }
+
+
+class JobState(db.Model):
+    """Cross-worker state for long-running background jobs (e.g. run-all pacing).
+
+    Why this exists: the backend runs under gunicorn with multiple worker
+    processes. An in-memory lock/counter only lives in one process, so a status
+    poll load-balanced to a *different* worker than the one running the job sees
+    no job in progress and reports "done" prematurely. Persisting state in
+    Postgres makes every worker agree on the truth.
+
+    One row per job_key (e.g. 'run_all_pacing'). `heartbeat` lets us detect a
+    crashed worker: if a job claims to be running but hasn't beat in a while,
+    it's treated as stale so the UI never gets stuck on "in progress".
+    """
+    __tablename__ = 'job_state'
+
+    # Consider a "running" job stale if its heartbeat is older than this.
+    # Matches the gunicorn --timeout so a single slow account between heartbeats
+    # can't be misread as a crashed worker. Past this, we assume the worker died
+    # and let a new run reclaim the job rather than lock the UI forever.
+    STALE_AFTER_SECONDS = 300
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_key = db.Column(db.String(100), nullable=False, unique=True, index=True)
+    is_running = db.Column(db.Boolean, default=False, nullable=False)
+    completed = db.Column(db.Integer, default=0, nullable=False)
+    total = db.Column(db.Integer, default=0, nullable=False)
+    started_at = db.Column(db.DateTime, nullable=True)
+    heartbeat = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+    def is_stale(self):
+        """True if marked running but the worker hasn't checked in recently."""
+        if not self.is_running:
+            return False
+        if self.heartbeat is None:
+            return True
+        age = (datetime.utcnow() - self.heartbeat).total_seconds()
+        return age > self.STALE_AFTER_SECONDS
+
+    def to_dict(self):
+        return {
+            'job_key': self.job_key,
+            # A stale job is reported as not running so the UI can recover.
+            'running': bool(self.is_running) and not self.is_stale(),
+            'completed': self.completed or 0,
+            'total': self.total or 0,
+            'started_at': self.started_at.isoformat() if self.started_at else None,
+            'heartbeat': self.heartbeat.isoformat() if self.heartbeat else None,
+            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
+        }
