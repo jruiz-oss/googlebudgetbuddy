@@ -159,7 +159,7 @@ def segment_budget_total(campaigns):
     """Sum one monthly budget per segment, not once per campaign row."""
     budgets = {}
     for campaign in campaigns or []:
-        label = campaign.budget_label or 'Primary'
+        label = (campaign.budget_label or 'Primary').strip().lower()
         budgets[label] = max(budgets.get(label, 0), campaign.monthly_budget or 0)
     return sum(budgets.values())
 

@@ -32,7 +32,7 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
   return (
     <aside className="sidebar">
       {/* Brand */}
-      <div className="sidebar-brand">
+      <div className="sidebar-brand" onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>
         <Logo size={144} />
       </div>
 
