@@ -176,6 +176,29 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-05-31 — Zero-budget accounts pause on any spend at the 100% threshold
+**What:** When an account has **no budget** (segment total `$0`/blank) but is spending, it now gets paused — provided its `auto_pause_threshold` is set to **100%**. Previously both the hourly pause job and the daily warning check skipped any account with `total_budget <= 0` outright (couldn't divide by a zero budget), so a campaign with no budget row could spend freely regardless of the auto-pause setting.
+**Behavior:**
+- At a **100%** threshold, any spend > $0 against a $0/missing budget is treated as over a $0 cap → pause every active campaign + write an `AUTO` `PauseEvent` (hourly job), and surface an `auto_pause_warning` (daily run).
+- At **any lower threshold (50–99%)**, a zero/missing budget is still skipped — a percentage of zero is undefined.
+- Grant accounts remain exempt (business rule B); `auto_pause_enabled = False` still skips entirely.
+**Caveat:** A $0 budget is indistinguishable from a budget sheet that hasn't synced or failed to sync. Gating this to the strictest 100% threshold limits blast radius, and both the pause and the warning log a "confirm the budget sheet synced" note. If false pauses become a problem, the next step is distinguishing "explicit 0" from "missing row" at sheet-sync time.
+**Changes:**
+- `backend/app.py`: `_hourly_auto_pause_job` — replaced the `if total_budget <= 0: continue` guard with an `else` branch that pauses when `auto_pause_threshold >= 100 and total_spend > 0`.
+- `backend/routes/pacing.py`: `run_pacing` auto-pause check — added the matching `elif` so the dashboard warning is consistent with the hourly pause.
+
+### 2026-05-31 — Hourly auto-pause for over-budget accounts
+**What:** Added a second APScheduler job that runs **every hour at :30** and actually pauses campaigns for any account at/over its auto-pause threshold. Previously the only scheduled check was the 06:00 UTC daily pacing run, and "auto-pause" was warning-only (the daily run set an `auto_pause_warning` flag but never paused — the sole real pause path was the manual `/pause` button). A campaign could blow past its cap mid-day and keep spending until the next morning.
+**Behavior:**
+- For each account, fetches CURRENT MTD spend via the shared `_execute_pacing_run()` core (one Google Ads call, no sheet sync/writeback), then compares segment-level total spend vs total budget using the same math as the daily threshold check.
+- If `spend_pct >= auto_pause_threshold`, pauses every active campaign via `pause_campaigns()` and writes a `PauseEvent(triggered_by='AUTO')`.
+- **Skips:** accounts with `auto_pause_enabled = False`, Grant accounts (business rule B), accounts with no valid OAuth token, and accounts with no budget.
+- Once paused, an account has no active campaigns left, so subsequent hourly passes are no-ops — no duplicate `PauseEvent` spam.
+- Alerts are **log + dashboard/DB only** (no email); over-budget pauses appear in pause history.
+**Changes:**
+- `backend/app.py`: Added `_hourly_auto_pause_job(app)`. Registered as a cron job (`minute=30`) in the scheduler block, gated by the existing production check plus a new `DISABLE_HOURLY_AUTOPAUSE` env flag. Runs only in the worker holding the APScheduler advisory lock.
+**Env:** `DISABLE_HOURLY_AUTOPAUSE` — set to `'true'` to disable just the hourly job (daily run still fires).
+
 ### 2026-05-29 — Fix Sync & Pace "Done!" reported while still running (cross-worker state)
 **What:** Fixed the home "Sync & Pace All" button showing "complete" prematurely, then returning "already in progress" (409) on the next click.
 **Root cause:** Gunicorn runs `--workers 2`. Run-all progress was tracked with a module-level `threading.Lock` (`_pacing_all_lock`) and an in-memory dict (`_pacing_all_progress`), which only exist inside ONE worker process. The background job ran in worker A, but `GET /run-all/status` polls were load-balanced to worker B — where the lock was free — so the frontend saw `running:false` and fired the success toast while worker A was still pacing. A follow-up click that landed on worker A then hit the still-held lock and got a 409.

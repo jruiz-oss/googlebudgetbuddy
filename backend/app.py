@@ -27,6 +27,7 @@ Optional:
   GOOGLE_CREDENTIALS_JSON — service account JSON for Google Sheets
   SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM — for digest emails
   DISABLE_SCHEDULER      — set to 'true' to skip APScheduler
+  DISABLE_HOURLY_AUTOPAUSE — set to 'true' to skip the hourly auto-pause job only
   SKIP_CREATE_ALL        — set to 'true' to skip db.create_all() on boot
 """
 
@@ -259,6 +260,147 @@ def _scheduled_pacing_job(app):
                 logger.error('Scheduled pacing failed for account %s: %s', account_id, e)
 
 
+# ── Hourly auto-pause job ──────────────────────────────────────────────────────
+
+def _hourly_auto_pause_job(app):
+    """Pause over-budget accounts — fires every hour.
+
+    The 06:00 UTC daily run only catches an account once a day; a campaign can
+    blow well past its cap mid-afternoon and keep spending until the next
+    morning. This lightweight hourly check closes that gap.
+
+    For each account it fetches CURRENT MTD spend (one Google Ads call via the
+    shared _execute_pacing_run core — no sheet sync/writeback), compares total
+    spend to total budget at the segment level (identical math to the daily
+    run), and if the account is at/over its auto-pause threshold it pauses every
+    active campaign and records an AUTO PauseEvent.
+
+    Skipped accounts:
+      • auto_pause_enabled = False (the feature is opt-in per account),
+      • Grant accounts ("grant" in the name) — exempt by business rule B,
+      • accounts with no valid OAuth token or no budget.
+
+    Once an account's campaigns are paused there are no active campaigns left, so
+    the next hourly pass is a no-op for it — no duplicate PauseEvent spam.
+    """
+    import json as _json
+    from datetime import datetime
+    from sqlalchemy.orm import selectinload
+
+    with app.app_context():
+        from database import Account, Campaign, GoogleOAuthToken, PauseEvent
+        from routes.pacing import _execute_pacing_run
+        from google_ads_client import pause_campaigns, GoogleAdsError
+
+        today = datetime.utcnow().date()
+        account_ids = [row[0] for row in db.session.query(Account.id).all()]
+        logger.info('Hourly auto-pause: scanning %d account(s)', len(account_ids))
+
+        for account_id in account_ids:
+            try:
+                account = (
+                    Account.query
+                    .options(
+                        selectinload(Account.campaigns).selectinload(Campaign.pacing_data),
+                        selectinload(Account.settings),
+                    )
+                    .get(account_id)
+                )
+                if account is None:
+                    continue
+
+                settings = account.settings
+                if not settings or not settings.auto_pause_enabled:
+                    continue
+
+                # Business rule B: Grant accounts are exempt from auto-pause.
+                if 'grant' in (account.account_name or '').lower():
+                    continue
+
+                token = GoogleOAuthToken.query.filter_by(
+                    user_id=account.user_id, is_valid=True
+                ).first()
+                if not token:
+                    continue
+
+                result = _execute_pacing_run(
+                    account, token.refresh_token, today,
+                    log_prefix='hourly_auto_pause',
+                )
+                # _execute_pacing_run may delete/replace today's PacingData rows;
+                # commit so that work isn't rolled back when we move on.
+                db.session.commit()
+
+                if not result['ok'] or result['no_campaigns'] or result['no_active']:
+                    continue
+
+                seg_budget_map = result['seg_budget_map']
+                seg_spend_map  = result['seg_spend_map']
+                total_budget = sum(seg_budget_map.values())
+                total_spend  = sum(seg_spend_map.values())
+
+                if total_budget > 0:
+                    spend_pct = (total_spend / total_budget) * 100
+                    if spend_pct < settings.auto_pause_threshold:
+                        continue
+                else:
+                    # No budget configured for this account. A $0/blank budget is
+                    # ambiguous — it can mean an intentional zero OR a sheet sync that
+                    # hasn't run/failed — so this branch ONLY fires at the strictest
+                    # 100% threshold. There the intent is "no spend without a budget,"
+                    # and any spend at all is over a $0 cap → pause. At any lower
+                    # threshold a zero budget is still skipped (can't compute a %).
+                    if settings.auto_pause_threshold >= 100 and total_spend > 0:
+                        spend_pct = 100.0
+                        logger.warning(
+                            'Hourly auto-pause: account_id=%s name=%r has $0/no budget '
+                            'but spent %.2f at 100%% threshold — pausing. Confirm the '
+                            'budget sheet actually synced (a failed sync looks identical).',
+                            account.id, account.account_name, total_spend,
+                        )
+                    else:
+                        continue
+
+                active = [c for c in result['active_campaigns'] if c.is_active]
+                campaign_ids = [c.google_campaign_id for c in active]
+                if not campaign_ids:
+                    continue
+
+                logger.warning(
+                    'Hourly auto-pause TRIGGERED: account_id=%s name=%r spend=%.2f budget=%.2f pct=%.1f threshold=%.1f',
+                    account.id, account.account_name, total_spend, total_budget,
+                    spend_pct, settings.auto_pause_threshold,
+                )
+
+                try:
+                    pause_campaigns(
+                        token.refresh_token,
+                        account.google_customer_id,
+                        campaign_ids,
+                        mcc_customer_id=account.mcc_customer_id,
+                    )
+                except GoogleAdsError as e:
+                    logger.error(
+                        'Hourly auto-pause: pause failed for account %s: %s',
+                        account.id, e,
+                    )
+                    continue
+
+                db.session.add(PauseEvent(
+                    account_id=account.id,
+                    spend_at_pause=round(total_spend, 2),
+                    budget_at_pause=round(total_budget, 2),
+                    threshold_pct=settings.auto_pause_threshold,
+                    paused_campaign_names=_json.dumps([c.campaign_name for c in active]),
+                    triggered_by='AUTO',
+                ))
+                db.session.commit()
+
+            except Exception as e:
+                db.session.rollback()
+                logger.error('Hourly auto-pause failed for account %s: %s', account_id, e)
+
+
 # ── Manual cron endpoint ───────────────────────────────────────────────────────
 
 app = create_app()
@@ -295,6 +437,16 @@ if os.environ.get('FLASK_ENV') == 'production' and not os.environ.get('DISABLE_S
             id='daily_pacing',
             replace_existing=True,
         )
+        if not os.environ.get('DISABLE_HOURLY_AUTOPAUSE'):
+            scheduler.add_job(
+                _hourly_auto_pause_job,
+                'cron',
+                minute=30,
+                args=[app],
+                id='hourly_auto_pause',
+                replace_existing=True,
+            )
+            logger.info('APScheduler — hourly auto-pause scheduled at :30 past each hour')
         scheduler.start()
         logger.info('APScheduler started — daily pacing at 06:00 UTC')
     else:

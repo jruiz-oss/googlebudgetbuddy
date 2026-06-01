@@ -825,6 +825,17 @@ def run_pacing(account_id):
                     'threshold': settings.auto_pause_threshold,
                     'message': f'Account has reached {spend_pct:.1f}% of monthly budget.',
                 }
+        elif settings.auto_pause_threshold >= 100 and total_spend > 0:
+            # No budget set but the account is spending. At the strictest 100%
+            # threshold any spend is over a $0 cap (mirrors the hourly pause job).
+            auto_pause_triggered = {
+                'spend_pct': 100.0,
+                'threshold': settings.auto_pause_threshold,
+                'message': (
+                    f'No budget set but account has spent ${total_spend:.2f} — '
+                    f'over $0 cap at 100% threshold. Confirm the budget sheet synced.'
+                ),
+            }
     elif is_grant_account and settings.auto_pause_enabled:
         auto_pause_triggered = {
             'spend_pct': 0,
