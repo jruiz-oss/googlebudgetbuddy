@@ -1,7 +1,7 @@
 """
 Google Ads API client.
 
-Handles all communication with the Google Ads API v18.
+Handles all communication with the Google Ads API v23.
 Uses OAuth 2.0 refresh tokens (stored in google_oauth_tokens table).
 
 Key responsibilities:
@@ -228,6 +228,21 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
 _PHANTOM_CHANNEL_TYPES = {'LOCAL_SERVICES', 'SMART', 'HOTEL', 'LOCAL'}
 
 
+def _date_part(dt_str: str):
+    """Normalize a Google Ads *_date_time value to a 'YYYY-MM-DD' date string.
+
+    As of API v23, campaign.end_date / start_date were renamed to
+    campaign.end_date_time / start_date_time and return a datetime like
+    '2037-12-30 00:00:00' (or ISO 'YYYY-MM-DDTHH:MM:SS'). Downstream code
+    (accounts.py, database.py) expects a plain date string, so strip the time.
+    Returns None for empty/missing values.
+    """
+    s = (dt_str or '').strip()
+    if not s:
+        return None
+    return s.replace('T', ' ').split(' ')[0] or None
+
+
 def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = None) -> list:
     """Return all ENABLED/PAUSED campaigns for the given customer.
 
@@ -245,7 +260,7 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
           campaign.id,
           campaign.name,
           campaign.status,
-          campaign.end_date,
+          campaign.end_date_time,
           campaign.advertising_channel_type,
           campaign.campaign_budget,
           campaign_budget.id,
@@ -267,8 +282,9 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
         if channel_type in _PHANTOM_CHANNEL_TYPES:
             continue
         micros = int(b.get('amountMicros', 0) or 0)
-        # endDate is 'YYYY-MM-DD' string or absent/empty if no end date is set
-        end_date = (c.get('endDate') or '').strip() or None
+        # endDateTime is 'YYYY-MM-DD HH:MM:SS' (v23 rename) or absent if no end
+        # date is set; normalize to a plain 'YYYY-MM-DD' date string.
+        end_date = _date_part(c.get('endDateTime'))
         campaigns.append({
             'campaign_id': str(c.get('id', '')),
             'campaign_name': c.get('name', ''),
@@ -333,7 +349,7 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
         SELECT
           campaign.id,
           campaign.status,
-          campaign.end_date,
+          campaign.end_date_time,
           campaign.advertising_channel_type,
           campaign_budget.amount_micros,
           campaign_budget.resource_name
@@ -361,7 +377,7 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
             'daily_budget_usd': round(budget_micros / 1_000_000, 2),
             'budget_resource_name': (budget_obj or {}).get('resourceName', ''),
             'status': (campaign_obj or {}).get('status') or None,
-            'end_date': (campaign_obj or {}).get('endDate') or None,
+            'end_date': _date_part((campaign_obj or {}).get('endDateTime')),
         }
 
     # Seed result with status/end_date for ALL campaigns (including 0-spend).
