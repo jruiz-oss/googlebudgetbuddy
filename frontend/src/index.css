@@ -570,7 +570,8 @@ html, body {
   color: var(--ink);
   flex: 1;
   min-width: 0;
-  overflow-wrap: break-word;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 .card-meta {
   font-size: 10.5px;
