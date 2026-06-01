@@ -11,7 +11,11 @@ function getDaysInfo() {
   // Use yesterday's day number so ideal-spend and % DIFF calculations match the sheet.
   const daysIn      = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  return { daysIn, daysInMonth, daysLeft: daysInMonth - daysIn };
+  // Calendar day of the month for display (1 on the 1st). `daysIn` is floored
+  // to 1 for divide-by-zero safety, so it can't be used for the "day X of Y"
+  // label — that would show "day 2" on the 1st.
+  const dayOfMonth  = today.getDate();
+  return { daysIn, daysInMonth, dayOfMonth, daysLeft: daysInMonth - daysIn };
 }
 
 function computePace(monthly, spend, daysIn, daysInMonth) {
@@ -384,7 +388,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   const { id }    = useParams();
   const navigate  = useNavigate();
   const toast     = useToast();
-  const { daysIn, daysInMonth } = getDaysInfo();
+  const { daysIn, daysInMonth, dayOfMonth } = getDaysInfo();
 
   const [account, setAccount]       = useState(null);
   const [campaigns, setCampaigns]   = useState([]);
@@ -696,7 +700,7 @@ export default function AccountDashboard({ onPacingComplete }) {
             <span style={{ color: 'var(--line-2)' }}>·</span>
             monthly {fmt(monthly)}
             <span style={{ color: 'var(--line-2)' }}>·</span>
-            day {daysIn + 1} of {daysInMonth}
+            day {dayOfMonth} of {daysInMonth}
             <span style={{ color: 'var(--line-2)' }}>·</span>
             <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
             <TrendBadge todayDelta={pace.deltaPct} prevDeltaPct={prevDeltaPct} inline />

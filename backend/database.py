@@ -12,11 +12,27 @@ def campaign_identity_key(campaign):
     return digits or f"db:{getattr(campaign, 'id', None) or id(campaign)}"
 
 
-def _campaign_latest_pacing(campaign, latest_date=None):
-    """Return the latest pacing row, optionally constrained to a specific date."""
+def current_month_start():
+    """First day of the current (UTC) calendar month.
+
+    Used to scope dashboard visibility and MTD spend to the current month so
+    that, at the start of a new month — before the first pacing run has written
+    any rows for it — last month's pacing data is NOT mistaken for this month's.
+    """
+    return datetime.utcnow().date().replace(day=1)
+
+
+def _campaign_latest_pacing(campaign, latest_date=None, month_start=None):
+    """Return the latest pacing row, optionally constrained to a specific date.
+
+    When ``month_start`` is given, pacing rows from before the current month are
+    ignored entirely so stale prior-month data can't leak into current views.
+    """
     rows = [
         p for p in (campaign.pacing_data or [])
-        if p.date is not None and (latest_date is None or p.date == latest_date)
+        if p.date is not None
+        and (latest_date is None or p.date == latest_date)
+        and (month_start is None or p.date >= month_start)
     ]
     if not rows:
         return None
@@ -53,13 +69,23 @@ def canonical_campaigns(campaigns):
     return sorted(canonical, key=lambda c: ((c.campaign_name or '').lower(), c.id or 0))
 
 
-def latest_pacing_date(campaigns):
-    """Return the latest pacing date across campaign rows."""
+def latest_pacing_date(campaigns, month_start=None):
+    """Return the latest pacing date across campaign rows.
+
+    When ``month_start`` is given, only pacing rows on/after that date are
+    considered — so the "latest run" used by the dashboard is always within the
+    current month, not last month's final run.
+    """
     latest = None
     for campaign in campaigns or []:
-        row_date = _campaign_latest_date(campaign)
-        if row_date and (latest is None or row_date > latest):
-            latest = row_date
+        for p in (campaign.pacing_data or []):
+            d = p.date
+            if not d:
+                continue
+            if month_start is not None and d < month_start:
+                continue
+            if latest is None or d > latest:
+                latest = d
     return latest
 
 
@@ -100,7 +126,7 @@ def dedupe_by_name(campaigns):
     return [max(twins, key=_freshness_score) for twins in by_name.values()]
 
 
-def visible_latest_campaigns(campaigns):
+def visible_latest_campaigns(campaigns, month_start=None):
     """Campaigns visible to dashboards. Mirrors the pacing-run inclusion rule.
 
     The rule (matches what the user wants on the per-account dashboard):
@@ -120,16 +146,24 @@ def visible_latest_campaigns(campaigns):
           the dashboard shows the same campaign twice.
     """
     from datetime import date as _date
+    if month_start is None:
+        month_start = current_month_start()
     canonical = canonical_campaigns(campaigns)
-    latest_date = latest_pacing_date(canonical)
+    # Only consider pacing rows from the current month. At the start of a new
+    # month (before its first run) this is None, so campaigns that merely spent
+    # *last* month are no longer treated as "spending now".
+    latest_date = latest_pacing_date(canonical, month_start=month_start)
     today = _date.today()
 
     # First pass: standard inclusion rule.
     visible = []
     for campaign in canonical:
-        latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
+        latest = _campaign_latest_pacing(campaign, latest_date, month_start=month_start) if latest_date else None
         has_spend_latest    = latest and (latest.actual_spend or 0) > 0
-        has_ever_been_paced = bool(campaign.pacing_data)
+        has_ever_been_paced = any(
+            p.date is not None and p.date >= month_start
+            for p in (campaign.pacing_data or [])
+        )
 
         if has_spend_latest:
             visible.append(campaign)
@@ -164,9 +198,15 @@ def segment_budget_total(campaigns):
     return sum(budgets.values())
 
 
-def campaign_mtd_spend_total(campaigns, latest_date=None):
-    """Sum latest-run MTD spend once per normalized Google campaign ID."""
-    latest_date = latest_date or latest_pacing_date(campaigns)
+def campaign_mtd_spend_total(campaigns, latest_date=None, month_start=None):
+    """Sum latest-run MTD spend once per normalized Google campaign ID.
+
+    Scoped to the current month so a prior-month run can't be summed as this
+    month's spend before the new month's first run.
+    """
+    if month_start is None:
+        month_start = current_month_start()
+    latest_date = latest_date or latest_pacing_date(campaigns, month_start=month_start)
     if not latest_date:
         return 0.0
 
@@ -176,7 +216,7 @@ def campaign_mtd_spend_total(campaigns, latest_date=None):
         key = campaign_identity_key(campaign)
         if key in seen:
             continue
-        latest = _campaign_latest_pacing(campaign, latest_date)
+        latest = _campaign_latest_pacing(campaign, latest_date, month_start=month_start)
         if not latest:
             continue
         seen.add(key)
@@ -184,9 +224,15 @@ def campaign_mtd_spend_total(campaigns, latest_date=None):
     return total
 
 
-def segment_spend_summaries(campaigns):
-    """Return deduped segment budget/spend/current-daily summaries."""
-    latest_date = latest_pacing_date(campaigns)
+def segment_spend_summaries(campaigns, month_start=None):
+    """Return deduped segment budget/spend/current-daily summaries.
+
+    Spend is scoped to the current month so segment MTD totals reset at the
+    month boundary instead of carrying last month's final run.
+    """
+    if month_start is None:
+        month_start = current_month_start()
+    latest_date = latest_pacing_date(campaigns, month_start=month_start)
     summaries = {}
     seen_spend = set()
 
@@ -211,7 +257,7 @@ def segment_spend_summaries(campaigns):
         key = campaign_identity_key(campaign)
         if key in seen_spend:
             continue
-        latest = _campaign_latest_pacing(campaign, latest_date) if latest_date else None
+        latest = _campaign_latest_pacing(campaign, latest_date, month_start=month_start) if latest_date else None
         if latest:
             seen_spend.add(key)
             row['spend'] += latest.actual_spend or 0.0
@@ -316,11 +362,12 @@ class Account(db.Model):
         # Dashboard data must reflect only the latest pacing run and only one DB
         # row per Google campaign ID. Older duplicate rows are retained for
         # history but never participate in live totals.
-        visible_campaigns = visible_latest_campaigns(self.campaigns)
+        month_start = current_month_start()
+        visible_campaigns = visible_latest_campaigns(self.campaigns, month_start=month_start)
         total_monthly_budget = segment_budget_total(visible_campaigns)
-        latest_date = latest_pacing_date(visible_campaigns)
-        total_mtd_spend = campaign_mtd_spend_total(visible_campaigns, latest_date)
-        segments = segment_spend_summaries(visible_campaigns)
+        latest_date = latest_pacing_date(visible_campaigns, month_start=month_start)
+        total_mtd_spend = campaign_mtd_spend_total(visible_campaigns, latest_date, month_start=month_start)
+        segments = segment_spend_summaries(visible_campaigns, month_start=month_start)
 
         on_track = over_pacing = under_pacing = 0
         for c in visible_campaigns:

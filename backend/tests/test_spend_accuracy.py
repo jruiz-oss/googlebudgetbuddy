@@ -18,6 +18,7 @@ from database import (  # noqa: E402
     campaign_mtd_spend_total,
     canonical_campaigns,
     db,
+    latest_pacing_date,
     segment_spend_summaries,
     visible_latest_campaigns,
 )
@@ -81,7 +82,7 @@ class SpendAccuracyTest(unittest.TestCase):
         old = Campaign(id=2, campaign_name='Old', google_campaign_id='2', is_active=False)
         old.pacing_data = [PacingData(date=stale, actual_spend=1600)]
 
-        result = visible_latest_campaigns([current, old])
+        result = visible_latest_campaigns([current, old], month_start=date(2026, 5, 1))
 
         self.assertEqual([c.google_campaign_id for c in result], ['1'])
 
@@ -90,7 +91,7 @@ class SpendAccuracyTest(unittest.TestCase):
         spent = Campaign(id=2, campaign_name='Spent', google_campaign_id='2', is_active=True)
         spent.pacing_data = [PacingData(date=date(2026, 5, 19), actual_spend=100)]
 
-        result = visible_latest_campaigns([live_zero, spent])
+        result = visible_latest_campaigns([live_zero, spent], month_start=date(2026, 5, 1))
 
         self.assertEqual([c.google_campaign_id for c in result], ['1', '2'])
 
@@ -102,9 +103,48 @@ class SpendAccuracyTest(unittest.TestCase):
         duplicate = Campaign(id=2, campaign_name='Duplicate', google_campaign_id='1', is_active=False)
         duplicate.pacing_data = [PacingData(date=stale_duplicate_date, actual_spend=999)]
 
-        result = visible_latest_campaigns([canonical, duplicate])
+        result = visible_latest_campaigns([canonical, duplicate], month_start=date(2026, 5, 1))
 
         self.assertEqual([c.id for c in result], [1])
+
+    def test_month_rollover_excludes_prior_month_spend(self):
+        """At the start of a new month (before its first run), a campaign that
+        only spent last month must not appear as currently spending, and its
+        prior-month spend must not be counted as this month's MTD."""
+        june_start = date(2026, 6, 1)
+        paused_last_month = Campaign(
+            id=1, campaign_name='May Only', google_campaign_id='1',
+            is_active=False, budget_label='Primary', monthly_budget=1000,
+        )
+        # Spent in May; PAUSED now, no June pacing rows yet.
+        paused_last_month.pacing_data = [PacingData(date=date(2026, 5, 31), actual_spend=500)]
+
+        visible = visible_latest_campaigns([paused_last_month], month_start=june_start)
+        self.assertEqual(visible, [], 'last month-only campaign should not be visible in the new month')
+
+        total = campaign_mtd_spend_total([paused_last_month], month_start=june_start)
+        self.assertEqual(total, 0.0, 'prior-month spend must not count toward new-month MTD')
+
+        segments = segment_spend_summaries([paused_last_month], month_start=june_start)
+        self.assertTrue(all(s['spend'] == 0.0 for s in segments))
+        self.assertIsNone(latest_pacing_date([paused_last_month], month_start=june_start))
+
+    def test_month_rollover_includes_current_month_spend(self):
+        """Once the new month has a run, in-month spend is counted normally."""
+        june_start = date(2026, 6, 1)
+        live = Campaign(
+            id=1, campaign_name='June Live', google_campaign_id='1',
+            is_active=True, budget_label='Primary', monthly_budget=1000,
+        )
+        live.pacing_data = [
+            PacingData(date=date(2026, 5, 31), actual_spend=500),  # last month, ignored
+            PacingData(date=date(2026, 6, 1), actual_spend=40),    # this month, counted
+        ]
+
+        visible = visible_latest_campaigns([live], month_start=june_start)
+        self.assertEqual([c.id for c in visible], [1])
+        total = campaign_mtd_spend_total([live], month_start=june_start)
+        self.assertEqual(total, 40.0)
 
     def test_normalized_campaign_ids_are_counted_once_in_totals(self):
         latest = date(2026, 5, 19)
@@ -128,8 +168,8 @@ class SpendAccuracyTest(unittest.TestCase):
         duplicate.pacing_data = [PacingData(date=latest, actual_spend=250)]
 
         canonical = canonical_campaigns([first, duplicate])
-        total = campaign_mtd_spend_total(canonical)
-        segments = segment_spend_summaries(canonical)
+        total = campaign_mtd_spend_total(canonical, month_start=date(2026, 5, 1))
+        segments = segment_spend_summaries(canonical, month_start=date(2026, 5, 1))
 
         self.assertEqual(len(canonical), 1)
         self.assertEqual(total, 250)

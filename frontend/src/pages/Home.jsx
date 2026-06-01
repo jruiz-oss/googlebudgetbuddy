@@ -11,7 +11,11 @@ function getDaysInfo() {
   // Use yesterday's day number so ideal-spend and % DIFF calculations match the sheet.
   const daysIn      = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  return { daysIn, daysInMonth, daysLeft: daysInMonth - daysIn };
+  // Calendar day of the month for display (1 on the 1st). `daysIn` is floored
+  // to 1 for divide-by-zero safety, so it can't be used for the "day X of Y"
+  // label — that would show "day 2" on the 1st.
+  const dayOfMonth  = today.getDate();
+  return { daysIn, daysInMonth, dayOfMonth, daysLeft: daysInMonth - daysIn };
 }
 
 function computePace(monthly, spend, daysIn, daysInMonth) {
@@ -351,7 +355,7 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
 }
 
 // ── Summary Bar ──────────────────────────────────────────────────────────
-function SummaryBar({ accounts, daysIn, daysInMonth }) {
+function SummaryBar({ accounts, daysIn, daysInMonth, dayOfMonth }) {
   const stats = useMemo(() => {
     let totalMonthly = 0, totalSpend = 0, totalIdeal = 0, over = 0, under = 0;
     for (const a of accounts) {
@@ -375,7 +379,7 @@ function SummaryBar({ accounts, daysIn, daysInMonth }) {
       <div className="cell">
         <div className="k">Accounts</div>
         <div className="v">{accounts.length}</div>
-        <div className="sub">day {daysIn + 1} / {daysInMonth} · {daysInMonth - daysIn} days left</div>
+        <div className="sub">day {dayOfMonth} / {daysInMonth} · {daysInMonth - dayOfMonth} days left</div>
       </div>
       <div className="cell">
         <div className="k">Portfolio pace</div>
@@ -531,7 +535,7 @@ function AddAccountModal({ onClose, onAdded }) {
 export default function Home({ onAccountsChange, onAccountSettingChange, accounts: propAccounts }) {
   const navigate       = useNavigate();
   const toast          = useToast();
-  const { daysIn, daysInMonth } = getDaysInfo();
+  const { daysIn, daysInMonth, dayOfMonth } = getDaysInfo();
 
   const [accounts, setAccounts]   = useState(propAccounts || []);
   const [loading, setLoading]     = useState(!propAccounts?.length);
@@ -774,7 +778,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
 
       {/* Summary strip */}
       {!loading && accounts.length > 0 && (
-        <SummaryBar accounts={accounts} daysIn={daysIn} daysInMonth={daysInMonth} />
+        <SummaryBar accounts={accounts} daysIn={daysIn} daysInMonth={daysInMonth} dayOfMonth={dayOfMonth} />
       )}
 
       {/* Filter bar */}

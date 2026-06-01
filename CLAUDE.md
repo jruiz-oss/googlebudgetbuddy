@@ -176,6 +176,16 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-01 — Fix month rollover: dashboard showed last month's campaigns/spend + "day 2 of 30" on the 1st
+**What:** At the start of a new month, before the first pacing run of that month, the dashboard kept showing campaigns that only spent *last* month and counted their prior-month spend as current MTD. Separately, the "day X of Y" label read "day 2 of 30" on the 1st.
+**Root cause (visibility/MTD):** `visible_latest_campaigns`, `latest_pacing_date`, `campaign_mtd_spend_total`, and `segment_spend_summaries` keyed off the *globally* latest `PacingData` date regardless of calendar month. On e.g. June 1 (no June run yet) that latest date was May 31, so every campaign with May 31 spend looked like it was "spending now" and its May spend was summed as June MTD. `Campaign.has_spend_this_month()` already gated on `date >= month_start`, but the dashboard path used the unscoped functions instead — an inconsistency.
+**Root cause (day label):** `daysIn = max(getDate()-1, 1)` is floored to 1 for divide-by-zero safety (spend is through EOD yesterday). The label rendered `daysIn + 1`, so on the 1st it showed `1 + 1 = 2`.
+**Fix:**
+- `backend/database.py`: Added `current_month_start()`. `latest_pacing_date`, `_campaign_latest_pacing`, `campaign_mtd_spend_total`, `segment_spend_summaries`, and `visible_latest_campaigns` now take an optional `month_start` (defaulting to the current UTC month) and ignore pacing rows before it. `visible_latest_campaigns`'s `has_ever_been_paced` is now scoped to the current month. `Account.to_dict()` computes `month_start` once and threads it through. Result: at a new month's start, MTD = 0 and only truly-new live campaigns show until the first run writes in-month data; it then self-corrects.
+- `frontend/src/pages/Home.jsx`, `AccountDashboard.jsx`: `getDaysInfo()` now also returns `dayOfMonth` (`today.getDate()`); the "day X of Y" labels use `dayOfMonth` instead of `daysIn + 1`. `daysIn` (floored) is unchanged for pacing math.
+- `backend/tests/test_spend_accuracy.py`: Existing May fixtures now pass an explicit `month_start=date(2026,5,1)` (deterministic regardless of run date). Added `test_month_rollover_excludes_prior_month_spend` and `test_month_rollover_includes_current_month_spend`.
+**Note:** Pre-existing unrelated test `test_pace_ratio_matches_sheet_budget_used_percent` fails (asserts the old `/days_in_month` recommendation while `_compute_recommendation` divides by `days_remaining`). Not touched here.
+
 ### 2026-05-31 — Zero-budget accounts pause on any spend at the 100% threshold
 **What:** When an account has **no budget** (segment total `$0`/blank) but is spending, it now gets paused — provided its `auto_pause_threshold` is set to **100%**. Previously both the hourly pause job and the daily warning check skipped any account with `total_budget <= 0` outright (couldn't divide by a zero budget), so a campaign with no budget row could spend freely regardless of the auto-pause setting.
 **Behavior:**
