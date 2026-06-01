@@ -176,6 +176,14 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-01 — Fix $0 current daily budget for ENABLED campaigns with stale is_active flag
+**What:** Campaigns that are ENABLED in Google Ads but marked `is_active=False` in the DB showed $0 for "Current Daily" on the dashboard, while their real Google Ads daily budgets were being ignored.
+**Root cause:** `_current_daily_for_run()` in `routes/pacing.py` checked `if not campaign.is_active: return 0.0` *before* checking the API value. So any campaign with a stale `is_active=False` (e.g. was paused in a prior sync but re-enabled since) would write `current_daily_budget=0` to its `PacingData` row even though the Google Ads API returned a valid budget. The dashboard then displayed $0 and the share % showed 0.0%.
+**Also fixed:** `update_campaign_budget()` in `google_ads_client.py` now floors the new daily budget to a minimum of $0.01 (10,000 micros) before sending to Google Ads, preventing `MONEY_AMOUNT_LESS_THAN_CURRENCY_MINIMUM_CPC` 400 errors when a recommended budget rounds to $0.
+**Fix:**
+- `backend/routes/pacing.py`: `_current_daily_for_run()` — moved `is_active` guard after the API lookup. API value is now authoritative regardless of DB `is_active` state; `is_active=False` only returns 0 when there is genuinely no API data.
+- `backend/google_ads_client.py`: `update_campaign_budget()` — clamps `new_daily_usd` to `max(new_daily_usd, 0.01)` before converting to micros.
+
 ### 2026-06-01 — Fix campaign sync failing on all accounts: `campaign.end_date` renamed in API v23
 **What:** MCC campaign sync was failing for **every** account ("MCC sync campaigns: 0 added, 0 updated across 28 accounts"). Live/new campaigns never made it into the DB, so accounts with recently-launched campaigns (e.g. Skytop Lodge) showed stale/missing campaigns while accounts whose campaigns were already cached looked fine.
 **Root cause:** As of Google Ads API **v23**, `campaign.end_date` was renamed to `campaign.end_date_time` (and `campaign.start_date` → `campaign.start_date_time`). The two GAQL queries in `google_ads_client.py` still selected `campaign.end_date`, so every `list_campaigns()` / status query returned `400 INVALID_ARGUMENT` / `queryError: UNRECOGNIZED_FIELD` ("Unrecognized field in the query: 'campaign.end_date'."). `accounts.py` caught this as "Campaign fetch failed for account N" and skipped the account. This was a silent regression introduced when `campaign.end_date` was added to the SELECT (2026-05-18), surfacing once the deployment hit v23.

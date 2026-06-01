@@ -470,6 +470,10 @@ def update_campaign_budget(refresh_token: str, customer_id: str,
     access_token = get_access_token(refresh_token)
     cid = customer_id.replace('-', '')
 
+    # Google Ads enforces a minimum of $0.01/day (10,000 micros for USD).
+    # Sending less triggers MONEY_AMOUNT_LESS_THAN_CURRENCY_MINIMUM_CPC.
+    MIN_DAILY_USD = 0.01
+    new_daily_usd = max(new_daily_usd, MIN_DAILY_USD)
     new_micros = int(round(new_daily_usd * 1_000_000))
 
     url = f'{GOOGLE_ADS_API_BASE}/customers/{cid}/campaignBudgets:mutate'

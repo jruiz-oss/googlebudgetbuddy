@@ -207,12 +207,20 @@ def _current_daily_from_history(campaign, today):
 
 
 def _current_daily_for_run(campaign, campaign_metrics, today):
-    """Current daily budget for ratio-based recommendations."""
-    if not campaign.is_active:
-        return 0.0
+    """Current daily budget for ratio-based recommendations.
+
+    API value takes precedence over is_active flag — the DB flag can be stale
+    (e.g. a campaign is ENABLED in Google Ads but marked inactive in our DB
+    because it was paused during a prior sync).  If the API returned a budget,
+    it is authoritative regardless of is_active.
+    """
     api_daily = campaign_metrics.get('daily_budget_usd')
     if api_daily is not None:
         return float(api_daily or 0.0)
+    # No live API data — fall back to DB value, but only for active campaigns.
+    # Inactive campaigns with no API data shouldn't influence recommendation math.
+    if not campaign.is_active:
+        return 0.0
     if campaign.current_daily_budget is not None:
         return float(campaign.current_daily_budget or 0.0)
     return _current_daily_from_history(campaign, today)
