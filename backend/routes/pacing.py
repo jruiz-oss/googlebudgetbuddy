@@ -926,6 +926,10 @@ def apply_recommendations(account_id):
         )
         old_daily = latest.current_daily_budget if latest and latest.current_daily_budget else 0.0
 
+        logger.info(
+            'apply_recommendations — campaign_id=%s resource=%s old=$%.2f new=$%.2f',
+            campaign_id, budget_resource, old_daily, new_daily,
+        )
         try:
             update_campaign_budget(
                 token.refresh_token,
@@ -934,6 +938,7 @@ def apply_recommendations(account_id):
                 new_daily,
                 mcc_customer_id=_effective_mcc_customer_id(account),
             )
+            logger.info('apply_recommendations — campaign_id=%s budget update OK', campaign_id)
         except GoogleAdsError as e:
             logger.error('Budget update failed for campaign %s: %s', campaign_id, e)
             errors.append({'campaign_id': campaign_id, 'error': str(e)})
