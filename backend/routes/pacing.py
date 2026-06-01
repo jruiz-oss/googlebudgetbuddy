@@ -957,11 +957,14 @@ def apply_recommendations(account_id):
         )
         db.session.add(adjustment)
 
-        # Update the latest pacing snapshot so the UI reflects the new budget
+        # Update the latest pacing snapshot so the UI reflects the new budget.
+        # Do NOT overwrite recommended_daily_budget — it should stay as the
+        # recommendation from the pacing run. Overwriting it with new_daily
+        # causes stale reads on the next apply (sends the old current instead
+        # of the fresh recommendation).
         campaign.current_daily_budget = new_daily
         if latest:
             latest.current_daily_budget = new_daily
-            latest.recommended_daily_budget = new_daily
             latest.status = 'ON_PACE'
             latest.change_percent = 0.0
 

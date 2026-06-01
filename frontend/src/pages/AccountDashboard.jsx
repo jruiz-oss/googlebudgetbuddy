@@ -543,21 +543,14 @@ export default function AccountDashboard({ onPacingComplete }) {
           return;
         }
 
-        // Use each campaign's backend-stored recommended daily budget (already
-        // ratio-preserving). Fall back to preserving current daily-budget shares.
-        const hasPacingData = eligible.some(c => c.latest_pacing?.recommended_daily_budget != null);
+        // Always derive the rec from the live frontend formula (item.rec was set
+        // by the Apply button from displayRec = pace.dailyRec). Never read from
+        // c.latest_pacing.recommended_daily_budget — the apply patch overwrites
+        // that field with the last-applied amount, so it becomes stale and can
+        // return the current budget instead of the fresh recommendation.
         const { daysIn: di, daysInMonth: dim } = getDaysInfo();
-        const fallbackRec = computePace(item.monthly, item.spend, di, dim).dailyRec;
-        const fallbackById = new Map(
-          allocateByCurrentShare(eligible, fallbackRec).map(a => [a.campaign_id, a.new_daily_budget])
-        );
-        const adjustments = eligible.map(c => ({
-          campaign_id:          c.id,
-          budget_resource_name: c.budget_resource_name,
-          new_daily_budget:     hasPacingData
-            ? (c.latest_pacing?.recommended_daily_budget ?? fallbackById.get(c.id) ?? 0)
-            : (fallbackById.get(c.id) ?? 0),
-        }));
+        const recToUse = item.rec != null ? item.rec : computePace(item.monthly, item.spend, di, dim).dailyRec;
+        const adjustments = allocateByCurrentShare(eligible, recToUse);
 
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
         applyOptimisticUpdate(adjustments);
