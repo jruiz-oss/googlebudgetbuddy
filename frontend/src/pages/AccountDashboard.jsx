@@ -74,7 +74,9 @@ function uniqueCampaigns(campaigns) {
 
 function allocateByCurrentShare(campaigns, totalDaily) {
   // Only push budget to ENABLED (actually running) campaigns — paused ones won't spend.
-  const eligible = uniqueCampaigns(campaigns).filter(c => c.budget_resource_name && c.is_active);
+  const eligible = uniqueCampaigns(campaigns).filter(c =>
+    c.budget_resource_name && (c.google_status === 'ENABLED' || c.is_active)
+  );
   if (!eligible.length) return [];
   const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
   const even = Math.round((totalDaily / eligible.length) * 100) / 100;
@@ -530,7 +532,9 @@ export default function AccountDashboard({ onPacingComplete }) {
         const segLabel = item.segmentOf ? normLabel(item.name) : null;
         const eligible = uniqueCampaigns(campaigns).filter(c =>
           c.budget_resource_name &&
-          c.is_active &&  // only push budget to ENABLED campaigns — paused ones won't spend
+          // Prefer google_status (live API value) over is_active (stale DB flag).
+          // is_active can be False for ENABLED campaigns that haven't re-synced.
+          (c.google_status === 'ENABLED' || c.is_active) &&
           (segLabel === null || normLabel(c.budget_label) === segLabel)
         );
 

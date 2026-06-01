@@ -884,16 +884,20 @@ def apply_recommendations(account_id):
       ]
     }
     """
+    logger.info('apply_recommendations — account_id=%s', account_id)
     account = Account.query.get_or_404(account_id)
     user_id = session['user_id']
     token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
     if not token:
+        logger.warning('apply_recommendations — no valid OAuth token for user_id=%s', user_id)
         return jsonify({'error': 'Google account not connected'}), 401
 
     data = request.get_json() or {}
     adjustments = data.get('adjustments') or []
     if not adjustments:
+        logger.warning('apply_recommendations — no adjustments in payload: %s', data)
         return jsonify({'error': 'No adjustments provided'}), 400
+    logger.info('apply_recommendations — %d adjustments for account_id=%s', len(adjustments), account_id)
 
     applied = []
     errors = []
