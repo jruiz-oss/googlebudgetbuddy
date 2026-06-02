@@ -317,9 +317,17 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     access_token = get_access_token(refresh_token)
 
-    # Yesterday is the last full day of data available
-    yesterday = (datetime.utcnow().date() - timedelta(days=1)).isoformat()
+    # Yesterday is the last full day of data available.
+    # On the 1st of the month, yesterday is still in the prior month — the
+    # BETWEEN range would be impossible (start > end) and return zero rows.
+    # Guard: if yesterday < month_start, skip the spend query entirely and
+    # return only the status-query results with spend=0. Pacing on day 1 will
+    # correctly show $0 MTD (no complete day of June data exists yet).
+    yesterday_date = datetime.utcnow().date() - timedelta(days=1)
+    yesterday = yesterday_date.isoformat()
     start = month_start.isoformat()
+
+    skip_spend_query = yesterday_date < month_start
 
     # Format campaign IDs for the IN clause
     id_list = ', '.join(str(cid) for cid in campaign_ids)
@@ -339,7 +347,12 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
           AND campaign.id IN ({id_list})
     """
 
-    rows = _gaql(access_token, customer_id, developer_token, query, mcc_customer_id=mcc_customer_id)
+    if skip_spend_query:
+        # Day 1 of month — no complete prior-day data exists yet for this month.
+        # Skip the spend query to avoid an impossible BETWEEN range.
+        rows = []
+    else:
+        rows = _gaql(access_token, customer_id, developer_token, query, mcc_customer_id=mcc_customer_id)
 
     # Also pull current status/end_date for campaigns with zero spend this month
     # (those won't appear in the metrics-by-date query above). Without this, we'd
