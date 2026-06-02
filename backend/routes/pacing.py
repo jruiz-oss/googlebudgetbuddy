@@ -322,8 +322,16 @@ def _is_zombie_campaign(campaign, today, api_spend):
         return True
 
     # Path 2: legacy fallback for rows without google_end_date populated.
-    # A campaign that has been paced before but pulls $0 today is dead.
-    if campaign.google_end_date is None and campaign.pacing_data:
+    # A campaign that has been paced *this month* but pulls $0 today is dead.
+    # Scope to the current month: at the start of a new month, prior-month
+    # pacing rows must NOT trigger the zombie filter — the campaign simply
+    # hasn't accumulated spend yet this month and is still live.
+    month_start = today.replace(day=1)
+    has_pacing_this_month = any(
+        p.date is not None and p.date >= month_start
+        for p in (campaign.pacing_data or [])
+    )
+    if campaign.google_end_date is None and has_pacing_this_month:
         return True
 
     return False
