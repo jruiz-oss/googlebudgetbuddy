@@ -620,6 +620,58 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
 # Search terms (for monthly AI summaries)
 # ---------------------------------------------------------------------------
 
+def get_campaign_spend_for_period(refresh_token: str, customer_id: str,
+                                   campaign_ids: list,
+                                   start_date: date, end_date: date,
+                                   mcc_customer_id: str = None) -> dict:
+    """Return total spend + clicks + conversions per campaign for an explicit date range.
+
+    Unlike get_campaign_mtd_spend (which always uses yesterday as end), this
+    accepts any end_date — used by monthly summary to get full past-month data.
+
+    Returns: {campaign_id_str: {'spend': float, 'clicks': int, 'conversions': float}}
+    """
+    if not campaign_ids:
+        return {}
+
+    developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
+    access_token = get_access_token(refresh_token)
+
+    id_list = ', '.join(str(cid) for cid in campaign_ids)
+    start = start_date.isoformat()
+    end   = end_date.isoformat()
+
+    query = f"""
+        SELECT
+          campaign.id,
+          metrics.cost_micros,
+          metrics.clicks,
+          metrics.conversions
+        FROM campaign
+        WHERE segments.date BETWEEN '{start}' AND '{end}'
+          AND campaign.id IN ({id_list})
+    """
+
+    try:
+        rows = _gaql(access_token, customer_id, developer_token, query,
+                     mcc_customer_id=mcc_customer_id)
+    except GoogleAdsError as e:
+        logger.warning('get_campaign_spend_for_period failed: %s', e)
+        return {}
+
+    result = {}
+    for r in rows:
+        cid = str(r.get('campaign', {}).get('id', ''))
+        m = r.get('metrics', {})
+        if cid not in result:
+            result[cid] = {'spend': 0.0, 'clicks': 0, 'conversions': 0.0}
+        result[cid]['spend']       += int(m.get('costMicros', 0) or 0) / 1_000_000
+        result[cid]['clicks']      += int(m.get('clicks', 0) or 0)
+        result[cid]['conversions'] += float(m.get('conversions', 0) or 0)
+
+    return result
+
+
 def get_top_search_terms(refresh_token: str, customer_id: str,
                           month_start: date, month_end: date,
                           mcc_customer_id: str = None,

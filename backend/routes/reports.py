@@ -61,72 +61,122 @@ def _month_date_range(year: int, month: int):
 
 
 def _build_context(account: Account, year: int, month: int,
-                   search_terms: list) -> str:
-    """Build the data block sent to Claude."""
+                   search_terms: list,
+                   live_spend: dict = None) -> str:
+    """Build the data block sent to Claude.
+
+    live_spend: {google_campaign_id_str: {spend, clicks, conversions}} fetched
+    directly from the Google Ads API for the full month. When provided, this
+    is used instead of pacing_data rows (which only reflect pacing-run snapshots
+    and will be incomplete for past months). Falls back to DB data if None.
+    """
     month_name = calendar.month_name[month]
     today = date.today()
 
-    # Pacing data scoped to this month
     month_start = date(year, month, 1)
     campaigns = account.campaigns or []
-    visible = visible_latest_campaigns(campaigns, month_start=month_start)
-    latest_date = latest_pacing_date(visible, month_start=month_start)
-    total_spend  = campaign_mtd_spend_total(visible, latest_date, month_start=month_start)
-    segments     = segment_spend_summaries(visible, month_start=month_start)
 
-    total_budget = sum(s['monthly'] for s in segments)
-    pct_used     = (total_spend / total_budget * 100) if total_budget > 0 else 0
+    # For segment budget totals we still use the DB (source of truth for budgets).
+    # We use all campaigns for the account, not just "visible" ones, because
+    # visibility is current-month logic and we may be summarising a past month.
+    from database import canonical_campaigns, segment_spend_summaries as _seg_summaries
+    all_campaigns = canonical_campaigns(campaigns)
+
+    # Budget: pull from DB segment structure
+    from database import segment_budget_total
+    total_budget = segment_budget_total(all_campaigns)
 
     # Days info
     last_day = calendar.monthrange(year, month)[1]
-    # For current month use yesterday; for past months use last day
     if year == today.year and month == today.month:
         days_elapsed = max(today.day - 1, 1)
     else:
         days_elapsed = last_day
 
-    ideal_spend = total_budget * (days_elapsed / last_day) if total_budget > 0 else 0
-    delta_pct   = ((total_spend / ideal_spend) - 1) * 100 if ideal_spend > 0 else 0
+    if live_spend:
+        # ── Live path: use Google Ads API data for this month ──────────────
+        total_spend = sum(v['spend'] for v in live_spend.values())
 
-    # Build segments block
-    seg_lines = []
-    for s in segments:
-        seg_lines.append(
-            f"  • {s['name']}: ${s['spend']:,.0f} of ${s['monthly']:,.0f} "
-            f"({s['pace_pct']:.0f}% used)"
-        )
+        # Per-segment spend using live data + DB budget labels
+        seg_spend = {}
+        seg_budget = {}
+        for c in all_campaigns:
+            label = (c.budget_label or 'Primary').strip()
+            key = str(c.google_campaign_id or '')
+            api = live_spend.get(key, {})
+            seg_spend[label]  = seg_spend.get(label, 0.0) + api.get('spend', 0.0)
+            seg_budget[label] = max(seg_budget.get(label, 0.0), c.monthly_budget or 0.0)
 
-    # Build campaigns block (top 15 by spend)
-    camp_lines = []
-    seen = set()
-    _min_date = date(2000, 1, 1)
+        seg_lines = []
+        for label in sorted(seg_spend):
+            bgt = seg_budget.get(label, 0)
+            spd = seg_spend[label]
+            pct = (spd / bgt * 100) if bgt > 0 else 0
+            seg_lines.append(f"  • {label}: ${spd:,.0f} of ${bgt:,.0f} ({pct:.0f}% used)")
 
-    def _latest_spend(c):
-        rows = sorted(c.pacing_data or [], key=lambda p: (p.date or _min_date, p.id or 0))
-        return rows[-1].actual_spend if rows else 0
+        # Per-campaign lines sorted by live spend
+        camp_data = []
+        for c in all_campaigns:
+            key = str(c.google_campaign_id or '')
+            api = live_spend.get(key, {})
+            camp_data.append((c, api.get('spend', 0.0), api.get('clicks', 0), api.get('conversions', 0.0)))
+        camp_data.sort(key=lambda x: x[1], reverse=True)
 
-    sorted_campaigns = sorted(visible, key=_latest_spend, reverse=True) if visible else []
+        camp_lines = []
+        for c, spend, clicks, convs in camp_data[:15]:
+            if spend == 0 and clicks == 0:
+                continue  # skip zero-activity campaigns from the narrative
+            status = (c.google_status or '').upper()
+            status_label = 'Live' if status == 'ENABLED' else ('Paused' if status == 'PAUSED' else status or 'Unknown')
+            line = f"  • {c.campaign_name} [{status_label}] — ${spend:,.0f}"
+            if c.budget_label:
+                line += f" (segment: {c.budget_label})"
+            if clicks:
+                line += f", {clicks:,} clicks"
+            if convs and convs > 0:
+                line += f", {convs:.0f} conversions"
+            camp_lines.append(line)
 
-    for c in sorted_campaigns[:15]:
-        key = c.google_campaign_id
-        if key in seen:
-            continue
-        seen.add(key)
-        lp = sorted(c.pacing_data or [], key=lambda p: (p.date or _min_date, p.id or 0))
-        latest = lp[-1] if lp else None
-        spend   = latest.actual_spend if latest else 0
-        clicks  = latest.clicks if latest else None
-        convs   = latest.conversions if latest else None
-        status  = (c.google_status or '').upper()
-        status_label = 'Live' if status == 'ENABLED' else ('Paused' if status == 'PAUSED' else status or 'Unknown')
-        line = f"  • {c.campaign_name} [{status_label}] — ${spend:,.0f} MTD"
-        if c.budget_label:
-            line += f" (segment: {c.budget_label})"
-        if clicks is not None:
-            line += f", {clicks:,} clicks"
-        if convs is not None and convs > 0:
-            line += f", {convs:.0f} conversions"
-        camp_lines.append(line)
+    else:
+        # ── Fallback path: use pacing_data from DB ─────────────────────────
+        visible = visible_latest_campaigns(campaigns, month_start=month_start)
+        latest_date = latest_pacing_date(visible, month_start=month_start)
+        total_spend = campaign_mtd_spend_total(visible, latest_date, month_start=month_start)
+        segments    = _seg_summaries(visible, month_start=month_start)
+
+        seg_lines = [
+            f"  • {s['name']}: ${s['spend']:,.0f} of ${s['monthly']:,.0f} ({s['pace_pct']:.0f}% used)"
+            for s in segments
+        ]
+
+        _min_date = date(2000, 1, 1)
+        def _latest_spend_db(c):
+            rows = sorted(c.pacing_data or [], key=lambda p: (p.date or _min_date, p.id or 0))
+            return rows[-1].actual_spend if rows else 0
+
+        sorted_campaigns = sorted(visible, key=_latest_spend_db, reverse=True)
+        camp_lines = []
+        seen = set()
+        for c in sorted_campaigns[:15]:
+            key = c.google_campaign_id
+            if key in seen:
+                continue
+            seen.add(key)
+            lp = sorted(c.pacing_data or [], key=lambda p: (p.date or _min_date, p.id or 0))
+            latest = lp[-1] if lp else None
+            spend = latest.actual_spend if latest else 0
+            clicks = latest.clicks if latest else None
+            convs  = latest.conversions if latest else None
+            status = (c.google_status or '').upper()
+            status_label = 'Live' if status == 'ENABLED' else ('Paused' if status == 'PAUSED' else status or 'Unknown')
+            line = f"  • {c.campaign_name} [{status_label}] — ${spend:,.0f} MTD"
+            if c.budget_label:
+                line += f" (segment: {c.budget_label})"
+            if clicks is not None:
+                line += f", {clicks:,} clicks"
+            if convs is not None and convs > 0:
+                line += f", {convs:.0f} conversions"
+            camp_lines.append(line)
 
     # Build search terms block
     st_lines = []
@@ -285,16 +335,49 @@ def generate_report(account_id, year, month):
     # Get OAuth token for Google Ads API calls
     token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
 
-    # Pull search terms (best-effort — don't block on failure)
+    today = date.today()
+    start_date, end_date = _month_date_range(year, month)
+    # For the current month, cap end date at yesterday (no complete data for today)
+    if year == today.year and month == today.month:
+        yesterday = date(today.year, today.month, max(today.day - 1, 1))
+        end_date = min(end_date, yesterday)
+
+    # Pull live spend + search terms from Google Ads (best-effort)
     search_terms = []
+    live_spend   = None   # {campaign_id: {spend, clicks, conversions}}
+
     if token:
-        from google_ads_client import get_top_search_terms, GoogleAdsError
-        start_date, end_date = _month_date_range(year, month)
-        # For current month, cap end date at yesterday
-        today = date.today()
-        if year == today.year and month == today.month:
-            yesterday = date(today.year, today.month, max(today.day - 1, 1))
-            end_date = min(end_date, yesterday)
+        from google_ads_client import (
+            get_top_search_terms, get_campaign_spend_for_period,
+            GoogleAdsError,
+        )
+        from database import canonical_campaigns
+
+        # Live spend for the full month — this is the source of truth for the
+        # summary, replacing stale pacing_data rows that only reflect run snapshots
+        campaign_ids = [
+            c.google_campaign_id
+            for c in canonical_campaigns(account.campaigns or [])
+            if c.google_campaign_id
+        ]
+        if campaign_ids and start_date <= end_date:
+            try:
+                live_spend = get_campaign_spend_for_period(
+                    token.refresh_token,
+                    account.google_customer_id,
+                    campaign_ids,
+                    start_date,
+                    end_date,
+                    mcc_customer_id=account.mcc_customer_id,
+                )
+                logger.info(
+                    'generate_report: live spend fetched for account %s '
+                    '(%d campaigns, %s–%s)',
+                    account_id, len(campaign_ids), start_date, end_date,
+                )
+            except Exception as e:
+                logger.warning('Live spend fetch failed for account %s: %s', account_id, e)
+
         try:
             search_terms = get_top_search_terms(
                 token.refresh_token,
@@ -309,8 +392,8 @@ def generate_report(account_id, year, month):
     # Get existing report for notes
     r = _get_or_create_report(account_id, year, month)
 
-    # Build data context
-    data_context = _build_context(account, year, month, search_terms)
+    # Build data context (live_spend takes precedence over DB pacing data)
+    data_context = _build_context(account, year, month, search_terms, live_spend=live_spend)
 
     # Call Claude
     month_name = calendar.month_name[month]
