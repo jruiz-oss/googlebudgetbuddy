@@ -22,6 +22,9 @@ export default function GlobalSettings() {
   const [applyingSheet, setApplyingSheet] = useState(false);
   const [connectingGoogle, setConnectingGoogle] = useState(false);
   const [lastSync, setLastSync] = useState(null);
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [anthropicKeyHint, setAnthropicKeyHint] = useState(null);
+  const [savingKey, setSavingKey] = useState(false);
 
   // Notification settings
   const [s, setS] = useState({
@@ -39,13 +42,28 @@ export default function GlobalSettings() {
   const set = (k, v) => setS(prev => ({ ...prev, [k]: v }));
 
   useEffect(() => {
-    // Load shared sheet ID if set on any account
     axios.get('/api/campaigns/all').then(r => {
       const accounts = r.data.accounts || [];
       const ids = [...new Set(accounts.map(a => a.settings?.google_sheet_id).filter(Boolean))];
       if (ids.length === 1) setSharedSheetId(ids[0]);
     }).catch(() => {});
+    axios.get('/api/reports/user-settings').then(r => {
+      if (r.data.anthropic_api_key_hint) setAnthropicKeyHint(r.data.anthropic_api_key_hint);
+    }).catch(() => {});
   }, []);
+
+  const saveAnthropicKey = async () => {
+    if (!anthropicKey.trim()) return;
+    setSavingKey(true);
+    try {
+      const r = await axios.put('/api/reports/user-settings', { anthropic_api_key: anthropicKey.trim() });
+      setAnthropicKeyHint(r.data.anthropic_api_key_hint);
+      setAnthropicKey('');
+      toast.success('Anthropic API key saved');
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to save key');
+    } finally { setSavingKey(false); }
+  };
 
   const connectGoogle = async () => {
     setConnectingGoogle(true);
@@ -241,6 +259,40 @@ export default function GlobalSettings() {
               />
               <button className="bb-btn bb-btn-primary" onClick={applySheetToAll} disabled={applyingSheet || !sharedSheetId.trim()}>
                 {applyingSheet ? 'Applying…' : 'Apply to all'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* ── AI Summaries ── */}
+        <div className="set-block">
+          <div className="set-h">AI monthly summaries</div>
+          <div className="set-sub">Paste your Anthropic API key to unlock one-click narrative summaries per account</div>
+
+          <div className="set-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 8, borderBottom: 'none' }}>
+            <div>
+              <div className="set-t">Anthropic API key</div>
+              <div className="set-d">
+                {anthropicKeyHint
+                  ? <>Key saved ({anthropicKeyHint}) — paste a new one to replace it</>
+                  : <>Get yours at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">console.anthropic.com</a></>}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+              <input
+                className="bb-input"
+                style={{ flex: 1 }}
+                type="password"
+                value={anthropicKey}
+                onChange={e => setAnthropicKey(e.target.value)}
+                placeholder="sk-ant-…"
+              />
+              <button
+                className="bb-btn bb-btn-primary"
+                onClick={saveAnthropicKey}
+                disabled={savingKey || !anthropicKey.trim()}
+              >
+                {savingKey ? 'Saving…' : 'Save key'}
               </button>
             </div>
           </div>

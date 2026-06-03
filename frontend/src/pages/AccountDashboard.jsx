@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { Play, Settings, History, Download, Plus, ArrowLeft, ArrowRight, Zap } from 'lucide-react';
+import { Play, Settings, History, Download, Plus, ArrowLeft, ArrowRight, Zap, FileText, Loader, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 
@@ -407,6 +407,7 @@ export default function AccountDashboard({ onPacingComplete }) {
   const [lastSync, setLastSync]     = useState(null);
   const [sheetSync, setSheetSync]   = useState(null);
   const [sheetWrite, setSheetWrite] = useState(null);
+  const [showSummary, setShowSummary] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -704,6 +705,7 @@ export default function AccountDashboard({ onPacingComplete }) {
           </div>
         </div>
         <div className="dactions">
+          <button className="btn small" onClick={() => setShowSummary(true)}><FileText size={13} /> Monthly Summary</button>
           <button className="btn small" onClick={() => navigate(`/accounts/${id}/settings`)}><Settings size={13} /> Settings</button>
           <button className="btn small" onClick={() => navigate(`/accounts/${id}/history`)}><History size={13} /> History</button>
           <button className="btn small" onClick={() => navigate(`/accounts/${id}/leads`)}><Download size={13} /> Leads</button>
@@ -941,6 +943,159 @@ export default function AccountDashboard({ onPacingComplete }) {
 
       {showImport && <ImportCampaignsModal account={account} onClose={() => setShowImport(false)} onImported={() => { setShowImport(false); load(); }} />}
       {applyItem  && <ApplyModal item={applyItem} onClose={() => setApplyItem(null)} onConfirm={handleConfirmApply} />}
+      {showSummary && <MonthlySummaryModal accountId={account.id} accountName={account.account_name} onClose={() => setShowSummary(false)} />}
+    </div>
+  );
+}
+
+
+// ── Monthly Summary Modal ────────────────────────────────────────────────────
+function MonthlySummaryModal({ accountId, accountName, onClose }) {
+  const toast = useToast();
+  const now   = new Date();
+
+  const [year,  setYear]  = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+
+  const [report,     setReport]     = useState(null);
+  const [notes,      setNotes]      = useState('');
+  const [summary,    setSummary]    = useState('');
+  const [loading,    setLoading]    = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [saving,     setSaving]     = useState(false);
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const years  = [now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2];
+
+  const loadReport = useCallback(async (y, m) => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`/api/reports/${accountId}/${y}/${m}`);
+      const rpt = r.data.report;
+      setReport(rpt);
+      setNotes(rpt.notes || '');
+      setSummary(rpt.generated_summary || '');
+    } catch { toast.error('Could not load report'); }
+    finally { setLoading(false); }
+  }, [accountId]);
+
+  useEffect(() => { loadReport(year, month); }, [year, month, loadReport]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await axios.put(`/api/reports/${accountId}/${year}/${month}`, { notes, generated_summary: summary });
+      toast.success('Saved');
+    } catch { toast.error('Save failed'); }
+    finally { setSaving(false); }
+  };
+
+  const generate = async () => {
+    try { await axios.put(`/api/reports/${accountId}/${year}/${month}`, { notes }); } catch {}
+    setGenerating(true);
+    try {
+      const r = await axios.post(`/api/reports/${accountId}/${year}/${month}/generate`);
+      const rpt = r.data.report;
+      setSummary(rpt.generated_summary || '');
+      setReport(rpt);
+      toast.success(`Generated · ${r.data.search_terms_used} search terms used`);
+    } catch (e) {
+      const msg = e.response?.data?.error || 'Generation failed';
+      toast.error(msg.includes('API key') ? 'No Anthropic API key — add it in Settings → AI Summaries' : msg);
+    } finally { setGenerating(false); }
+  };
+
+  const monthLabel = `${MONTHS[month - 1]} ${year}`;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-box"
+        style={{ maxWidth: 700, width: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 'var(--t-md)' }}>Monthly Summary</div>
+            <div style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)', marginTop: 2 }}>{accountName}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <select className="hifi-select" value={month} onChange={e => setMonth(Number(e.target.value))} style={{ fontSize: 'var(--t-sm)' }}>
+              {MONTHS.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+            </select>
+            <select className="hifi-select" value={year} onChange={e => setYear(Number(e.target.value))} style={{ fontSize: 'var(--t-sm)' }}>
+              {years.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <button className="btn ghost small" onClick={onClose}>✕</button>
+          </div>
+        </div>
+
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: 48, color: 'var(--muted)' }}>
+            <Loader size={20} style={{ animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : (
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 'var(--t-sm)', fontWeight: 600, marginBottom: 4 }}>Your notes for {monthLabel}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+                What changed? Bid strategy shifts, copy updates, new keywords, audience changes. Claude uses these as primary context — the more specific, the better.
+              </div>
+              <textarea
+                style={{
+                  width: '100%', minHeight: 120, padding: '10px 12px',
+                  background: 'var(--bg-2)', border: '1px solid var(--line-2)',
+                  borderRadius: 6, color: 'var(--text-1)', fontSize: 'var(--t-sm)',
+                  resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5, boxSizing: 'border-box',
+                }}
+                placeholder={`e.g. Shifted to maximize clicks on core terms. Updated ad copy from "coming soon" to "now open." Added location visits as a conversion goal. Cleaned up search terms around gambling flags...`}
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+              />
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button className="btn primary" onClick={generate} disabled={generating} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {generating
+                  ? <><Loader size={13} style={{ animation: 'spin 1s linear infinite' }} /> Generating…</>
+                  : <><RefreshCw size={13} /> Generate summary</>}
+              </button>
+              {report?.last_generated_at && (
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  Last generated {new Date(report.last_generated_at).toLocaleDateString()}
+                </span>
+              )}
+            </div>
+
+            {(summary || generating) && (
+              <div>
+                <div style={{ fontSize: 'var(--t-sm)', fontWeight: 600, marginBottom: 4 }}>
+                  Summary — {monthLabel}
+                  <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted)', marginLeft: 8 }}>editable</span>
+                </div>
+                <textarea
+                  style={{
+                    width: '100%', minHeight: 220, padding: '12px 14px',
+                    background: 'var(--bg-1)', border: '1px solid var(--line-1)',
+                    borderRadius: 6, color: 'var(--text-1)', fontSize: 'var(--t-sm)',
+                    resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.7, boxSizing: 'border-box',
+                  }}
+                  value={generating ? 'Generating…' : summary}
+                  onChange={e => setSummary(e.target.value)}
+                  readOnly={generating}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {!loading && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--line-2)' }}>
+            <button className="btn ghost" onClick={onClose}>Close</button>
+            <button className="btn" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

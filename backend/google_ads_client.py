@@ -614,3 +614,64 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
             'fields': field_data,
         })
     return leads
+
+
+# ---------------------------------------------------------------------------
+# Search terms (for monthly AI summaries)
+# ---------------------------------------------------------------------------
+
+def get_top_search_terms(refresh_token: str, customer_id: str,
+                          month_start: date, month_end: date,
+                          mcc_customer_id: str = None,
+                          limit: int = 30) -> list:
+    """Return the top search terms for the month by clicks.
+
+    Used to give the AI summary context about what users were actually searching for.
+    Returns a list of dicts: [{query, clicks, impressions, conversions, ctr}, ...]
+    """
+    developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
+    access_token = get_access_token(refresh_token)
+
+    start = month_start.isoformat()
+    end = month_end.isoformat()
+
+    query = f"""
+        SELECT
+          search_term_view.search_term,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.conversions,
+          metrics.cost_micros
+        FROM search_term_view
+        WHERE segments.date BETWEEN '{start}' AND '{end}'
+          AND search_term_view.status != 'EXCLUDED'
+        ORDER BY metrics.clicks DESC
+        LIMIT {limit}
+    """
+
+    try:
+        rows = _gaql(access_token, customer_id, developer_token, query,
+                     mcc_customer_id=mcc_customer_id)
+    except GoogleAdsError as e:
+        logger.warning('Could not fetch search terms for %s: %s', customer_id, e)
+        return []
+
+    results = []
+    for r in rows:
+        stv = r.get('searchTermView', {})
+        m = r.get('metrics', {})
+        clicks = int(m.get('clicks', 0) or 0)
+        impressions = int(m.get('impressions', 0) or 0)
+        conversions = float(m.get('conversions', 0) or 0)
+        spend = int(m.get('costMicros', 0) or 0) / 1_000_000
+        ctr = (clicks / impressions * 100) if impressions > 0 else 0.0
+        results.append({
+            'query': stv.get('searchTerm', ''),
+            'clicks': clicks,
+            'impressions': impressions,
+            'conversions': round(conversions, 1),
+            'spend': round(spend, 2),
+            'ctr': round(ctr, 1),
+        })
+
+    return results

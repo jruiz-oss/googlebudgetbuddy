@@ -709,6 +709,64 @@ class AccountSettings(db.Model):
         }
 
 
+class UserSettings(db.Model):
+    """Per-user global configuration (e.g. Anthropic API key for AI summaries)."""
+    __tablename__ = 'user_settings'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, unique=True)
+    anthropic_api_key = db.Column(db.String(500), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            # Never return the full key — just a masked hint so the UI knows one is set.
+            'anthropic_api_key_set': bool(self.anthropic_api_key),
+            'anthropic_api_key_hint': (
+                '…' + self.anthropic_api_key[-4:] if self.anthropic_api_key else None
+            ),
+        }
+
+
+class MonthlyReport(db.Model):
+    """AI-generated monthly summary per account.
+
+    One row per (account_id, year, month). The user can add notes which are
+    sent to Claude along with pacing data and search terms to generate a
+    plain-language narrative summary. The output is editable and saved here.
+    """
+    __tablename__ = 'monthly_reports'
+    __table_args__ = (
+        db.UniqueConstraint('account_id', 'year', 'month', name='uq_report_account_month'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False, index=True)
+    year = db.Column(db.Integer, nullable=False)
+    month = db.Column(db.Integer, nullable=False)   # 1–12
+    notes = db.Column(db.Text, nullable=True)       # user-written context
+    generated_summary = db.Column(db.Text, nullable=True)  # Claude output
+    last_generated_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'account_id': self.account_id,
+            'year': self.year,
+            'month': self.month,
+            'notes': self.notes or '',
+            'generated_summary': self.generated_summary or '',
+            'last_generated_at': self.last_generated_at.isoformat() if self.last_generated_at else None,
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat(),
+        }
+
+
 class JobState(db.Model):
     """Cross-worker state for long-running background jobs (e.g. run-all pacing).
 

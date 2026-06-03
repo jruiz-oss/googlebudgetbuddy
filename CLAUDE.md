@@ -176,6 +176,18 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-03 — Monthly AI summaries
+**What:** Added a "Monthly Summary" button to each account dashboard that opens a modal where you type notes about what happened (strategy shifts, copy changes, etc.), then click Generate. Claude pulls top search terms from Google Ads for the month, combines them with pacing data and your notes, and writes a 2–4 paragraph narrative — not a metrics readout. Output is editable and saved per account per month. Month/year picker for historical access.
+**New files:**
+- `backend/routes/reports.py` — CRUD for monthly reports + `/generate` endpoint (Anthropic API call)
+- `backend/google_ads_client.py` — added `get_top_search_terms()` via `search_term_view` GAQL
+- `database.py` — `MonthlyReport` (account_id, year, month, notes, generated_summary) + `UserSettings` (anthropic_api_key per user)
+**Settings:** Anthropic API key stored per-user in `UserSettings`. Add via Settings → AI Summaries.
+**Env:** `ANTHROPIC_API_KEY` can be set server-side as fallback. Per-user key takes precedence.
+**Migration:** `app.py` creates `user_settings` and `monthly_reports` tables via `CREATE TABLE IF NOT EXISTS` on boot.
+
+
+
 ### 2026-06-01 — Fix $0 current daily budget for ENABLED campaigns with stale is_active flag
 **What:** Campaigns that are ENABLED in Google Ads but marked `is_active=False` in the DB showed $0 for "Current Daily" on the dashboard, while their real Google Ads daily budgets were being ignored.
 **Root cause:** `_current_daily_for_run()` in `routes/pacing.py` checked `if not campaign.is_active: return 0.0` *before* checking the API value. So any campaign with a stale `is_active=False` (e.g. was paused in a prior sync but re-enabled since) would write `current_daily_budget=0` to its `PacingData` row even though the Google Ads API returned a valid budget. The dashboard then displayed $0 and the share % showed 0.0%.

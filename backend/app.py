@@ -113,6 +113,27 @@ def _run_lightweight_migrations():
          'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_end_date DATE'),
         ('campaigns.google_status',
          "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_status VARCHAR(50)"),
+        ('user_settings table',
+         """CREATE TABLE IF NOT EXISTS user_settings (
+             id SERIAL PRIMARY KEY,
+             user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+             anthropic_api_key VARCHAR(500),
+             created_at TIMESTAMP DEFAULT NOW(),
+             updated_at TIMESTAMP DEFAULT NOW()
+         )"""),
+        ('monthly_reports table',
+         """CREATE TABLE IF NOT EXISTS monthly_reports (
+             id SERIAL PRIMARY KEY,
+             account_id INTEGER NOT NULL REFERENCES accounts(id),
+             year INTEGER NOT NULL,
+             month INTEGER NOT NULL,
+             notes TEXT,
+             generated_summary TEXT,
+             last_generated_at TIMESTAMP,
+             created_at TIMESTAMP DEFAULT NOW(),
+             updated_at TIMESTAMP DEFAULT NOW(),
+             UNIQUE(account_id, year, month)
+         )"""),
     ]
 
     with db.engine.begin() as conn:
@@ -159,9 +180,10 @@ def create_app():
     from routes.sheets import sheets_bp
     from routes.leads import leads_bp
     from routes.webhook import webhook_bp
+    from routes.reports import reports_bp
 
     for bp in [auth_bp, oauth_bp, accounts_bp, campaigns_bp,
-               pacing_bp, settings_bp, history_bp, sheets_bp, leads_bp, webhook_bp]:
+               pacing_bp, settings_bp, history_bp, sheets_bp, leads_bp, webhook_bp, reports_bp]:
         app.register_blueprint(bp)
 
     # ── Health check ──────────────────────────────────────────────────────────
