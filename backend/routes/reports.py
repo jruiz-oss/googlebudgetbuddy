@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 reports_bp = Blueprint('reports', __name__, url_prefix='/api/reports')
 
 ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
-ANTHROPIC_MODEL   = 'claude-opus-4-6'
+ANTHROPIC_MODEL   = 'claude-sonnet-4-6'
 
 
 # ---------------------------------------------------------------------------
