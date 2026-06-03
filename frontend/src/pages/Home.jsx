@@ -215,7 +215,7 @@ function ApplyModal({ item, onClose, onConfirm }) {
   if (!item) return null;
   const { daysIn, daysInMonth, daysLeft } = getDaysInfo();
   const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
-  const current   = pace.dailyCurrent;
+  const current   = item.currentDailyBudget ?? pace.dailyCurrent;
   const rec       = pace.dailyRec;
   const diff      = Math.abs(rec - current);
   const direction = rec > current ? 'increase' : 'decrease';
@@ -300,7 +300,7 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
       navigate(`/accounts/${account.id}`);
     } else {
       // Pass accountId and campaigns so the confirm handler can build adjustments
-      onApply({ name: account.account_name, accountId: account.id, campaigns: account.campaigns || [], monthly, spend });
+      onApply({ name: account.account_name, accountId: account.id, campaigns: account.campaigns || [], monthly, spend, currentDailyBudget });
     }
   };
 
