@@ -178,6 +178,12 @@ def _build_context(account: Account, year: int, month: int,
                 line += f", {convs:.0f} conversions"
             camp_lines.append(line)
 
+    # Compute pct_used and delta_pct for context block (used in both live and DB paths)
+    pct_used = (total_spend / total_budget * 100) if total_budget else 0
+    # delta_pct: % DIFF vs ideal pace (positive = ahead, negative = behind)
+    projected = (total_spend * last_day / days_elapsed) if days_elapsed > 0 else 0
+    delta_pct = ((projected - total_budget) / total_budget * 100) if total_budget else 0
+
     # Build search terms block
     st_lines = []
     for st in search_terms[:20]:
