@@ -215,7 +215,7 @@ def create_app():
 # ── Scheduled pacing job ──────────────────────────────────────────────────────
 
 def _scheduled_pacing_job(app):
-    """Run pacing for every account — fires daily at 06:00 UTC.
+    """Run pacing for every account — fires every 2 hours at :00.
 
     Same fresh-reload-per-iteration pattern as _run_pacing_all_job: bulk-loading
     accounts up front leaves them stale after the first run_pacing_for_account()
@@ -453,10 +453,10 @@ if os.environ.get('FLASK_ENV') == 'production' and not os.environ.get('DISABLE_S
         scheduler.add_job(
             _scheduled_pacing_job,
             'cron',
-            hour=6,
+            hour='*/2',
             minute=0,
             args=[app],
-            id='daily_pacing',
+            id='hourly_pacing',
             replace_existing=True,
         )
         if not os.environ.get('DISABLE_HOURLY_AUTOPAUSE'):
@@ -470,7 +470,7 @@ if os.environ.get('FLASK_ENV') == 'production' and not os.environ.get('DISABLE_S
             )
             logger.info('APScheduler — hourly auto-pause scheduled at :30 past each hour')
         scheduler.start()
-        logger.info('APScheduler started — daily pacing at 06:00 UTC')
+        logger.info('APScheduler started — pacing every 2 hours at :00')
     else:
         logger.info('APScheduler not started in this worker — advisory lock held by another worker')
 
