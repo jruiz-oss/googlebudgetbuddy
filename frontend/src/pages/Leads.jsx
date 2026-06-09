@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Download, Search } from 'lucide-react';
+import { Copy, Download, Search } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 
@@ -54,6 +54,35 @@ export default function Leads() {
     return [...std, ...custom];
   };
 
+  // TSV on the clipboard — pasting into Google Sheets splits into columns.
+  // Mirrors the Excel export's dynamic columns.
+  const copyForSheets = async () => {
+    const BASE = ['FULL_NAME', 'EMAIL', 'PHONE_NUMBER', 'CITY'];
+    const extraStd = [...new Set(leads.flatMap(l => Object.keys(l.fields || {}).filter(k => !BASE.includes(k))))].sort();
+    const customQs = [...new Set(leads.flatMap(l => Object.keys(l.custom_fields || {})))].sort();
+    const header = [
+      'Submitted At', 'Name', 'Email', 'Phone', 'City', 'Campaign',
+      ...extraStd.map(k => k.replace(/_/g, ' ').toLowerCase()),
+      ...customQs,
+    ];
+    const clean = v => String(v ?? '').replace(/[\t\n\r]+/g, ' ');
+    const lines = leads.map(l => {
+      const cr = l.campaign_resource || '';
+      return [
+        l.submitted_at || '', l.name || '', l.email || '', l.phone || '', l.city || '',
+        cr ? cr.split('/').pop() : '',
+        ...extraStd.map(k => (l.fields || {})[k] || ''),
+        ...customQs.map(q => (l.custom_fields || {})[q] || ''),
+      ].map(clean).join('\t');
+    });
+    try {
+      await navigator.clipboard.writeText([header.map(clean).join('\t'), ...lines].join('\n'));
+      toast.success(`Copied ${leads.length} lead(s) — paste into Google Sheets`);
+    } catch {
+      toast.error('Copy failed — your browser may be blocking clipboard access');
+    }
+  };
+
   const exportCsv = async () => {
     // window.open with a relative URL hits the frontend origin (no /api routes
     // there — the SPA catch-all sends you home). Fetch through axios instead,
@@ -96,9 +125,14 @@ export default function Leads() {
             <Search size={15} /> {loading ? 'Pulling…' : 'Pull Leads'}
           </button>
           {leads.length > 0 && (
-            <button className="bb-btn bb-btn-secondary" onClick={exportCsv}>
-              <Download size={15} /> Export Excel
-            </button>
+            <>
+              <button className="bb-btn bb-btn-secondary" onClick={copyForSheets}>
+                <Copy size={15} /> Copy for Sheets
+              </button>
+              <button className="bb-btn bb-btn-secondary" onClick={exportCsv}>
+                <Download size={15} /> Export Excel
+              </button>
+            </>
           )}
         </div>
       </div>

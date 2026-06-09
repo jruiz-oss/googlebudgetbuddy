@@ -176,6 +176,9 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — "Copy for Sheets" button on Leads page
+**What:** One-click copy of pulled leads as TSV to the clipboard — pasting into Google Sheets splits into columns. Same dynamic columns as the Excel export (base + extra standard fields + custom questions). Frontend-only (`frontend/src/pages/Leads.jsx`, `copyForSheets()`); tabs/newlines inside answers are flattened to spaces so they can't break rows.
+
 ### 2026-06-09 — Lead export is now a real Excel .xlsx (was CSV)
 **What:** Exported CSVs opened in the user's code editor (file association) and read as raw text. Export now produces a real `.xlsx` so it always opens in Excel/Numbers.
 **Changes:**
