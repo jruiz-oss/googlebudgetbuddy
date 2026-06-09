@@ -44,9 +44,27 @@ export default function Leads() {
     }
   };
 
-  const exportCsv = () => {
-    const url = `/api/leads/${id}/export?start_date=${startDate}&end_date=${endDate}`;
-    window.open(url, '_blank');
+  const exportCsv = async () => {
+    // window.open with a relative URL hits the frontend origin (no /api routes
+    // there — the SPA catch-all sends you home). Fetch through axios instead,
+    // which carries the backend baseURL + session cookie, then save the blob.
+    try {
+      const r = await axios.get(`/api/leads/${id}/export`, {
+        params: { start_date: startDate, end_date: endDate },
+        responseType: 'blob',
+      });
+      const name = (account?.account_name || `account_${id}`).replace(/\s+/g, '_');
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `leads_${name}_${startDate}_${endDate}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to export CSV');
+    }
   };
 
   return (

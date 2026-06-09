@@ -176,6 +176,12 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — Fix CSV export navigating to home instead of downloading
+**What:** "Export CSV" on the Leads page redirected to the home dashboard instead of saving a file.
+**Root cause:** `exportCsv()` used `window.open('/api/leads/<id>/export?…')` with a *relative* URL. Axios calls carry `baseURL = VITE_API_URL` (Railway backend), but `window.open` resolved against the Vercel frontend origin, where no `/api` routes exist — the SPA catch-all rendered Home.
+**Fix:** `frontend/src/pages/Leads.jsx` — export now fetches via axios (`responseType: 'blob'`, session cookie + backend baseURL included) and triggers the download with a temporary object-URL anchor. Errors surface as a toast.
+**Watch:** Any other `window.open`/`<a href>` pointing at `/api/...` has the same bug — always go through axios or prefix with the API base.
+
 ### 2026-06-09 — Lead pull returning 0: diagnostics + custom-field capture
 **What:** After the 403 fix, lead pulls returned HTTP 200 with `count: 0` for every date range on an account confirmed to use native lead form assets. A silent zero is ambiguous, so `/pull` now self-diagnoses.
 **Changes:**
