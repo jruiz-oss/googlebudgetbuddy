@@ -176,6 +176,13 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — Surface all submitted lead form answers (table + CSV)
+**What:** Lead answers beyond name/email/phone/city (extra standard fields like postal code/company, plus custom question answers) were captured but never shown or exported.
+**Changes:**
+- `backend/routes/leads.py`: CSV export now appends one column per extra standard field (union across leads, Title Cased) and one column per custom question text, after the base columns.
+- `frontend/src/pages/Leads.jsx`: Added an "Answers" column listing each extra field/custom Q&A per lead; `extraAnswers()` helper merges `fields` (minus base four) + `custom_fields`.
+**Note:** Columns are dynamic — exports from different accounts/forms will have different headers.
+
 ### 2026-06-09 — Fix CSV export navigating to home instead of downloading
 **What:** "Export CSV" on the Leads page redirected to the home dashboard instead of saving a file.
 **Root cause:** `exportCsv()` used `window.open('/api/leads/<id>/export?…')` with a *relative* URL. Axios calls carry `baseURL = VITE_API_URL` (Railway backend), but `window.open` resolved against the Vercel frontend origin, where no `/api` routes exist — the SPA catch-all rendered Home.

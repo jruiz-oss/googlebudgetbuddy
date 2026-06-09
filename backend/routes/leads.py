@@ -168,25 +168,35 @@ def export_leads_csv(account_id):
     except GoogleAdsError as e:
         return jsonify({'error': str(e)}), 502
 
-    # Build CSV
+    # Build CSV — base columns plus one column per extra answer found across
+    # all leads (standard fields beyond the base four + custom questions).
+    BASE_FIELDS = ('FULL_NAME', 'EMAIL', 'PHONE_NUMBER', 'CITY')
+    extra_std = sorted({k for lead in leads for k in lead.get('fields', {}) if k and k not in BASE_FIELDS})
+    custom_qs = sorted({q for lead in leads for q in lead.get('custom_fields', {}) if q})
+
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # Header row
-    writer.writerow(['Submitted At', 'Name', 'Email', 'Phone', 'City', 'Campaign'])
+    header = ['Submitted At', 'Name', 'Email', 'Phone', 'City', 'Campaign']
+    header += [k.replace('_', ' ').title() for k in extra_std]
+    header += custom_qs
+    writer.writerow(header)
 
     for lead in leads:
         # Extract campaign name from resource name (last segment)
         campaign_resource = lead.get('campaign_resource', '')
         campaign_name = campaign_resource.split('/')[-1] if campaign_resource else ''
-        writer.writerow([
+        row = [
             lead.get('submitted_at', ''),
             lead.get('name', ''),
             lead.get('email', ''),
             lead.get('phone', ''),
             lead.get('city', ''),
             campaign_name,
-        ])
+        ]
+        row += [lead.get('fields', {}).get(k, '') for k in extra_std]
+        row += [lead.get('custom_fields', {}).get(q, '') for q in custom_qs]
+        writer.writerow(row)
 
     # Log the export
     export_month = today.strftime('%Y-%m')

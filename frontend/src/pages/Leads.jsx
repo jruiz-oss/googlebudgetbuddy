@@ -44,6 +44,16 @@ export default function Leads() {
     }
   };
 
+  // Every answer beyond the base columns: extra standard fields + custom questions
+  const extraAnswers = (lead) => {
+    const BASE = ['FULL_NAME', 'EMAIL', 'PHONE_NUMBER', 'CITY'];
+    const std = Object.entries(lead.fields || {})
+      .filter(([k, v]) => v && !BASE.includes(k))
+      .map(([k, v]) => [k.replace(/_/g, ' ').toLowerCase(), v]);
+    const custom = Object.entries(lead.custom_fields || {}).filter(([, v]) => v);
+    return [...std, ...custom];
+  };
+
   const exportCsv = async () => {
     // window.open with a relative URL hits the frontend origin (no /api routes
     // there — the SPA catch-all sends you home). Fetch through axios instead,
@@ -104,6 +114,7 @@ export default function Leads() {
                 <th>Email</th>
                 <th>Phone</th>
                 <th>City</th>
+                <th>Answers</th>
               </tr>
             </thead>
             <tbody>
@@ -114,6 +125,13 @@ export default function Leads() {
                   <td>{lead.email || '—'}</td>
                   <td>{lead.phone || '—'}</td>
                   <td>{lead.city || '—'}</td>
+                  <td style={{ fontSize: '13px' }}>
+                    {extraAnswers(lead).length > 0
+                      ? extraAnswers(lead).map(([q, a], j) => (
+                          <div key={j}><span className="bb-muted">{q}:</span> {a}</div>
+                        ))
+                      : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
