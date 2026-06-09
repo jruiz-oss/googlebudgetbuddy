@@ -176,6 +176,15 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — Lead pull returning 0: diagnostics + custom-field capture
+**What:** After the 403 fix, lead pulls returned HTTP 200 with `count: 0` for every date range on an account confirmed to use native lead form assets. A silent zero is ambiguous, so `/pull` now self-diagnoses.
+**Changes:**
+- `backend/google_ads_client.py`: Added `diagnose_lead_form_setup()` — two probes: (1) count of `LEAD_FORM` assets on the customer, (2) unfiltered `lead_form_submission_data` query (LIMIT 50) with sample `submission_date_time` values. Distinguishes "no lead form assets visible / wrong customer ID" vs "assets exist, zero submissions in API (60-day retention or visibility)" vs "submissions exist but the date filter drops them" (sample timestamps expose the format mismatch). Also: main pull query now selects `custom_lead_form_submission_fields` and returns them as `custom_fields` per lead — custom questions were previously dropped.
+- `backend/routes/leads.py`: `/pull` runs the diagnostic when 0 leads come back, logs it (`Lead pull diagnostics for account …`), and returns `diagnostic` (human-readable) + `diagnostic_data` (raw) in the response. Best-effort — diagnostics never fail the pull.
+- `frontend/src/pages/Leads.jsx`: Shows the diagnostic in a callout under "No leads found".
+**Known constraint:** The Google Ads API retains lead form submissions for 60 days (UI download: only 30 days, per https://support.google.com/google-ads/answer/12080108). Leads older than 60 days are unrecoverable via API.
+**Next step:** Re-run a pull and read the "Why" callout to pick the real fix.
+
 ### 2026-06-09 — Fix lead pull 403 USER_PERMISSION_DENIED (missing login-customer-id fallback)
 **What:** Pulling leads failed with `403 PERMISSION_DENIED / USER_PERMISSION_DENIED` ("User doesn't have permission to access customer…") on accounts where pacing worked fine.
 **Root cause:** `routes/pacing.py` has `_effective_mcc_customer_id(account)`, which falls back to the `GOOGLE_ADS_MCC_ID` env var when `account.mcc_customer_id` is null. Every pacing call uses it. But `routes/leads.py`, `routes/reports.py`, and the `pause_campaigns` call in `app.py`'s hourly auto-pause passed `account.mcc_customer_id` **directly** with no fallback. For any account with a null `mcc_customer_id`, no `login-customer-id` (manager) header was sent, so Google treated it as direct client access and denied it. Pacing succeeded on the same account only because of the env fallback.

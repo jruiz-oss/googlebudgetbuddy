@@ -11,6 +11,7 @@ export default function Leads() {
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(false);
   const [pulled, setPulled] = useState(false);
+  const [diagnostic, setDiagnostic] = useState('');
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
@@ -29,9 +30,11 @@ export default function Leads() {
     setLoading(true);
     setLeads([]);
     setPulled(false);
+    setDiagnostic('');
     try {
       const r = await axios.get(`/api/leads/${id}/pull`, { params: { start_date: startDate, end_date: endDate } });
       setLeads(r.data.leads || []);
+      setDiagnostic(r.data.diagnostic || '');
       setPulled(true);
       toast.success(`Pulled ${r.data.count} lead(s)`);
     } catch (e) {
@@ -100,7 +103,16 @@ export default function Leads() {
         </div>
       ) : (
         !loading && (pulled
-        ? <p className="bb-muted">No leads found for this date range.</p>
+        ? (
+          <div>
+            <p className="bb-muted">No leads found for this date range.</p>
+            {diagnostic && (
+              <div className="bb-card" style={{ marginTop: '12px', borderLeft: '3px solid #e8a23d' }}>
+                <p style={{ fontSize: '13px', margin: 0 }}><strong>Why:</strong> {diagnostic}</p>
+              </div>
+            )}
+          </div>
+        )
         : <p className="bb-muted">Select a date range and click Pull Leads to view submissions.</p>
       )
       )}

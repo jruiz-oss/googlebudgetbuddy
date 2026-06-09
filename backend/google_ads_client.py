@@ -583,7 +583,8 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
           lead_form_submission_data.campaign,
           lead_form_submission_data.ad_group,
           lead_form_submission_data.submission_date_time,
-          lead_form_submission_data.lead_form_submission_fields
+          lead_form_submission_data.lead_form_submission_fields,
+          lead_form_submission_data.custom_lead_form_submission_fields
         FROM lead_form_submission_data
         WHERE lead_form_submission_data.submission_date_time >= '{start} 00:00:00'
           AND lead_form_submission_data.submission_date_time <= '{end} 23:59:59'
@@ -601,6 +602,10 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
         lf = r.get('leadFormSubmissionData', {})
         fields = lf.get('leadFormSubmissionFields', [])
         field_data = {f.get('fieldType', ''): f.get('fieldValue', '') for f in fields}
+        # Custom questions come back in customLeadFormSubmissionFields,
+        # not leadFormSubmissionFields — merge so they aren't dropped.
+        custom_fields = lf.get('customLeadFormSubmissionFields', [])
+        custom_data = {f.get('questionText', ''): f.get('fieldValue', '') for f in custom_fields}
         leads.append({
             'id': lf.get('id', ''),
             'campaign_resource': lf.get('campaign', ''),
@@ -611,8 +616,73 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
             'phone': field_data.get('PHONE_NUMBER', ''),
             'city': field_data.get('CITY', ''),
             'fields': field_data,
+            'custom_fields': custom_data,
         })
     return leads
+
+
+def diagnose_lead_form_setup(refresh_token: str, customer_id: str,
+                             mcc_customer_id: str = None) -> dict:
+    """Figure out WHY a lead pull returned 0 rows.
+
+    Two cheap probes:
+      1. Does the account have any LEAD_FORM assets at all?
+      2. Does lead_form_submission_data return ANY rows with NO date filter?
+         If yes while the filtered query returned 0, the date filter is the
+         bug — sample timestamps show the exact format Google returns.
+
+    Returns:
+      {
+        'lead_form_asset_count': int,
+        'unfiltered_submission_count': int,   # capped at 50 (probe limit)
+        'sample_submission_datetimes': [str], # up to 5, newest first
+        'errors': [str],                      # probe-level errors (best-effort)
+      }
+    """
+    developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
+    access_token = get_access_token(refresh_token)
+
+    result = {
+        'lead_form_asset_count': 0,
+        'unfiltered_submission_count': 0,
+        'sample_submission_datetimes': [],
+        'errors': [],
+    }
+
+    # Probe 1: lead form assets visible on this customer
+    try:
+        rows = _gaql(
+            access_token, customer_id, developer_token,
+            "SELECT asset.id FROM asset WHERE asset.type = 'LEAD_FORM'",
+            mcc_customer_id=mcc_customer_id,
+        )
+        result['lead_form_asset_count'] = len(rows)
+    except GoogleAdsError as e:
+        result['errors'].append(f'Asset probe failed: {e}')
+
+    # Probe 2: unfiltered submissions — isolates the date filter
+    try:
+        rows = _gaql(
+            access_token, customer_id, developer_token,
+            """
+            SELECT
+              lead_form_submission_data.id,
+              lead_form_submission_data.submission_date_time
+            FROM lead_form_submission_data
+            LIMIT 50
+            """,
+            mcc_customer_id=mcc_customer_id,
+        )
+        result['unfiltered_submission_count'] = len(rows)
+        stamps = sorted(
+            (r.get('leadFormSubmissionData', {}).get('submissionDateTime', '') for r in rows),
+            reverse=True,
+        )
+        result['sample_submission_datetimes'] = [s for s in stamps if s][:5]
+    except GoogleAdsError as e:
+        result['errors'].append(f'Submission probe failed: {e}')
+
+    return result
 
 
 # ---------------------------------------------------------------------------

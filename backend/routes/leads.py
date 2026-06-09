@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from flask import Blueprint, Response, jsonify, request, session
 
 from database import Account, AccountSettings, GoogleOAuthToken, LeadExport, db
-from google_ads_client import GoogleAdsError, get_lead_form_submissions
+from google_ads_client import GoogleAdsError, diagnose_lead_form_setup, get_lead_form_submissions
 from routes.auth import login_required
 
 logger = logging.getLogger(__name__)
@@ -78,11 +78,52 @@ def pull_leads(account_id):
         logger.error('Lead pull failed for account %s: %s', account_id, e)
         return jsonify({'error': str(e)}), 502
 
-    return jsonify({
+    payload = {
         'leads': leads,
         'count': len(leads),
         'date_range': {'start': start_str, 'end': end_str},
-    })
+    }
+
+    # Zero leads with a clean 200 is ambiguous — run probes to say WHY.
+    if not leads:
+        try:
+            diag = diagnose_lead_form_setup(
+                token.refresh_token,
+                account.google_customer_id,
+                mcc_customer_id=_effective_mcc_customer_id(account),
+            )
+            logger.info('Lead pull diagnostics for account %s: %s', account_id, diag)
+            payload['diagnostic_data'] = diag
+
+            if diag['errors']:
+                payload['diagnostic'] = 'Diagnostic probes hit errors: ' + '; '.join(diag['errors'])
+            elif diag['lead_form_asset_count'] == 0:
+                payload['diagnostic'] = (
+                    'No lead form assets are visible on this Google Ads account. '
+                    'Either the account has no native lead form assets, or BudgetBuddy is '
+                    'querying the wrong customer ID for this account.'
+                )
+            elif diag['unfiltered_submission_count'] == 0:
+                payload['diagnostic'] = (
+                    f"Found {diag['lead_form_asset_count']} lead form asset(s), but Google "
+                    'returned zero submissions even with no date filter. Note: the API only '
+                    'retains lead form submissions for 60 days (UI download: 30 days). If '
+                    'leads from the last 60 days exist in the Google Ads UI but not here, '
+                    'this is an API visibility issue (check the OAuth user and '
+                    'login-customer-id).'
+                )
+            else:
+                samples = ', '.join(diag['sample_submission_datetimes'])
+                payload['diagnostic'] = (
+                    f"Google has {diag['unfiltered_submission_count']}+ submissions, but the "
+                    'date filter matched none. Most recent submission timestamps: '
+                    f'{samples}. Compare these against your selected range — if they fall '
+                    'inside it, the date filter format is the bug.'
+                )
+        except Exception as e:  # diagnostics must never break the pull itself
+            logger.warning('Lead pull diagnostics failed for account %s: %s', account_id, e)
+
+    return jsonify(payload)
 
 
 @leads_bp.route('/<int:account_id>/export', methods=['GET'])
