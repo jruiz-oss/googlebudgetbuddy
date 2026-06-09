@@ -176,6 +176,14 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — Lead export is now a real Excel .xlsx (was CSV)
+**What:** Exported CSVs opened in the user's code editor (file association) and read as raw text. Export now produces a real `.xlsx` so it always opens in Excel/Numbers.
+**Changes:**
+- `backend/requirements.txt`: Added `openpyxl==3.1.5`.
+- `backend/routes/leads.py`: `/export` builds an openpyxl Workbook (bold header, auto column widths, same dynamic answer columns) and returns it with the xlsx mimetype. Removed `csv` import.
+- `frontend/src/pages/Leads.jsx`: Download filename `.xlsx`; button renamed "Export Excel".
+**Deploy note:** Railway must reinstall deps (`openpyxl`) — happens automatically on deploy from requirements.txt.
+
 ### 2026-06-09 — Surface all submitted lead form answers (table + CSV)
 **What:** Lead answers beyond name/email/phone/city (extra standard fields like postal code/company, plus custom question answers) were captured but never shown or exported.
 **Changes:**

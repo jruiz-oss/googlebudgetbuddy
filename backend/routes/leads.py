@@ -5,11 +5,13 @@ GET  /api/leads/<account_id>/pull   — fetch leads from Google Ads API for a da
 GET  /api/leads/<account_id>/export — return leads as CSV download
 """
 
-import csv
 import io
 import logging
 import os
 from datetime import date, datetime, timedelta
+
+from openpyxl import Workbook
+from openpyxl.styles import Font
 
 from flask import Blueprint, Response, jsonify, request, session
 
@@ -168,19 +170,23 @@ def export_leads_csv(account_id):
     except GoogleAdsError as e:
         return jsonify({'error': str(e)}), 502
 
-    # Build CSV — base columns plus one column per extra answer found across
-    # all leads (standard fields beyond the base four + custom questions).
+    # Build Excel workbook — base columns plus one column per extra answer
+    # found across all leads (standard fields beyond the base four + custom
+    # questions). Real .xlsx so it opens in Excel/Numbers, not a text editor.
     BASE_FIELDS = ('FULL_NAME', 'EMAIL', 'PHONE_NUMBER', 'CITY')
     extra_std = sorted({k for lead in leads for k in lead.get('fields', {}) if k and k not in BASE_FIELDS})
     custom_qs = sorted({q for lead in leads for q in lead.get('custom_fields', {}) if q})
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-
     header = ['Submitted At', 'Name', 'Email', 'Phone', 'City', 'Campaign']
     header += [k.replace('_', ' ').title() for k in extra_std]
     header += custom_qs
-    writer.writerow(header)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Leads'
+    ws.append(header)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
 
     for lead in leads:
         # Extract campaign name from resource name (last segment)
@@ -196,7 +202,15 @@ def export_leads_csv(account_id):
         ]
         row += [lead.get('fields', {}).get(k, '') for k in extra_std]
         row += [lead.get('custom_fields', {}).get(q, '') for q in custom_qs]
-        writer.writerow(row)
+        ws.append(row)
+
+    # Reasonable column widths
+    for col in ws.columns:
+        width = max(len(str(c.value)) if c.value else 0 for c in col)
+        ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 10), 50)
+
+    output = io.BytesIO()
+    wb.save(output)
 
     # Log the export
     export_month = today.strftime('%Y-%m')
@@ -209,10 +223,10 @@ def export_leads_csv(account_id):
     db.session.add(log)
     db.session.commit()
 
-    filename = f'leads_{account.account_name.replace(" ", "_")}_{start_str}_{end_str}.csv'
+    filename = f'leads_{account.account_name.replace(" ", "_")}_{start_str}_{end_str}.xlsx'
     output.seek(0)
     return Response(
         output.getvalue(),
-        mimetype='text/csv',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         headers={'Content-Disposition': f'attachment; filename="{filename}"'},
     )

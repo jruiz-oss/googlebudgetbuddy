@@ -67,13 +67,13 @@ export default function Leads() {
       const url = URL.createObjectURL(r.data);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `leads_${name}_${startDate}_${endDate}.csv`;
+      a.download = `leads_${name}_${startDate}_${endDate}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
     } catch (e) {
-      toast.error(e.response?.data?.error || 'Failed to export CSV');
+      toast.error(e.response?.data?.error || 'Failed to export');
     }
   };
 
@@ -97,7 +97,7 @@ export default function Leads() {
           </button>
           {leads.length > 0 && (
             <button className="bb-btn bb-btn-secondary" onClick={exportCsv}>
-              <Download size={15} /> Export CSV
+              <Download size={15} /> Export Excel
             </button>
           )}
         </div>
