@@ -8,6 +8,7 @@ GET  /api/leads/<account_id>/export — return leads as CSV download
 import csv
 import io
 import logging
+import os
 from datetime import date, datetime, timedelta
 
 from flask import Blueprint, Response, jsonify, request, session
@@ -19,6 +20,17 @@ from routes.auth import login_required
 logger = logging.getLogger(__name__)
 
 leads_bp = Blueprint('leads', __name__, url_prefix='/api/leads')
+
+
+def _effective_mcc_customer_id(account):
+    """Use the account-specific MCC when present, otherwise fall back to env.
+
+    Mirrors routes.pacing._effective_mcc_customer_id so the lead pull sends the
+    same login-customer-id header pacing uses. Without this, accounts with a
+    null mcc_customer_id get no manager header and Google returns
+    USER_PERMISSION_DENIED on client-account queries.
+    """
+    return (account.mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '').strip() or None
 
 
 @leads_bp.route('/<int:account_id>/pull', methods=['GET'])
@@ -60,7 +72,7 @@ def pull_leads(account_id):
             account.google_customer_id,
             start_date,
             end_date,
-            mcc_customer_id=account.mcc_customer_id,
+            mcc_customer_id=_effective_mcc_customer_id(account),
         )
     except GoogleAdsError as e:
         logger.error('Lead pull failed for account %s: %s', account_id, e)
@@ -110,7 +122,7 @@ def export_leads_csv(account_id):
             account.google_customer_id,
             start_date,
             end_date,
-            mcc_customer_id=account.mcc_customer_id,
+            mcc_customer_id=_effective_mcc_customer_id(account),
         )
     except GoogleAdsError as e:
         return jsonify({'error': str(e)}), 502

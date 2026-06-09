@@ -311,7 +311,7 @@ def _hourly_auto_pause_job(app):
 
     with app.app_context():
         from database import Account, Campaign, GoogleOAuthToken, PauseEvent
-        from routes.pacing import _execute_pacing_run
+        from routes.pacing import _execute_pacing_run, _effective_mcc_customer_id
         from google_ads_client import pause_campaigns, GoogleAdsError
 
         today = datetime.utcnow().date()
@@ -399,7 +399,7 @@ def _hourly_auto_pause_job(app):
                         token.refresh_token,
                         account.google_customer_id,
                         campaign_ids,
-                        mcc_customer_id=account.mcc_customer_id,
+                        mcc_customer_id=_effective_mcc_customer_id(account),
                     )
                 except GoogleAdsError as e:
                     logger.error(

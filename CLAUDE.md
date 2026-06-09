@@ -176,6 +176,15 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-09 — Fix lead pull 403 USER_PERMISSION_DENIED (missing login-customer-id fallback)
+**What:** Pulling leads failed with `403 PERMISSION_DENIED / USER_PERMISSION_DENIED` ("User doesn't have permission to access customer…") on accounts where pacing worked fine.
+**Root cause:** `routes/pacing.py` has `_effective_mcc_customer_id(account)`, which falls back to the `GOOGLE_ADS_MCC_ID` env var when `account.mcc_customer_id` is null. Every pacing call uses it. But `routes/leads.py`, `routes/reports.py`, and the `pause_campaigns` call in `app.py`'s hourly auto-pause passed `account.mcc_customer_id` **directly** with no fallback. For any account with a null `mcc_customer_id`, no `login-customer-id` (manager) header was sent, so Google treated it as direct client access and denied it. Pacing succeeded on the same account only because of the env fallback.
+**Fix:**
+- `backend/routes/leads.py`: Added a local `_effective_mcc_customer_id()` (mirrors pacing) + `import os`. Both `/pull` and `/export` now use it.
+- `backend/routes/reports.py`: Added the same helper; both Google Ads pulls in `/generate` (`get_campaign_spend_for_period`, `get_top_search_terms`) now use it.
+- `backend/app.py`: Hourly auto-pause now imports `_effective_mcc_customer_id` from `routes.pacing` and uses it for the `pause_campaigns` call.
+**Watch:** Any new Google Ads call should route its MCC id through `_effective_mcc_customer_id(account)`, never `account.mcc_customer_id` raw.
+
 ### 2026-06-03 — Monthly AI summaries
 **What:** Added a "Monthly Summary" button to each account dashboard that opens a modal where you type notes about what happened (strategy shifts, copy changes, etc.), then click Generate. Claude pulls top search terms from Google Ads for the month, combines them with pacing data and your notes, and writes a 2–4 paragraph narrative — not a metrics readout. Output is editable and saved per account per month. Month/year picker for historical access.
 **New files:**

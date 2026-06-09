@@ -38,6 +38,16 @@ ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
 ANTHROPIC_MODEL   = 'claude-sonnet-4-6'
 
 
+def _effective_mcc_customer_id(account):
+    """Use the account-specific MCC when present, otherwise fall back to env.
+
+    Mirrors routes.pacing._effective_mcc_customer_id so report Google Ads pulls
+    send the same login-customer-id header pacing uses. Without it, accounts
+    with a null mcc_customer_id hit USER_PERMISSION_DENIED on client queries.
+    """
+    return (account.mcc_customer_id or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '').strip() or None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -374,7 +384,7 @@ def generate_report(account_id, year, month):
                     campaign_ids,
                     start_date,
                     end_date,
-                    mcc_customer_id=account.mcc_customer_id,
+                    mcc_customer_id=_effective_mcc_customer_id(account),
                 )
                 logger.info(
                     'generate_report: live spend fetched for account %s '
@@ -390,7 +400,7 @@ def generate_report(account_id, year, month):
                 account.google_customer_id,
                 start_date,
                 end_date,
-                mcc_customer_id=account.mcc_customer_id,
+                mcc_customer_id=_effective_mcc_customer_id(account),
             )
         except Exception as e:
             logger.warning('Search terms fetch failed for account %s: %s', account_id, e)
