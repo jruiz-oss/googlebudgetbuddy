@@ -593,9 +593,8 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
     try:
         rows = _gaql(access_token, customer_id, developer_token, query, mcc_customer_id=mcc_customer_id)
     except GoogleAdsError as e:
-        # Lead form submissions may not be available for all account types
-        logger.warning('Could not fetch lead form submissions: %s', e)
-        return []
+        logger.error('Could not fetch lead form submissions: %s', e)
+        raise
 
     leads = []
     for r in rows:

@@ -10,6 +10,7 @@ export default function Leads() {
   const [account, setAccount] = useState(null);
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [pulled, setPulled] = useState(false);
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
@@ -27,9 +28,11 @@ export default function Leads() {
   const pullLeads = async () => {
     setLoading(true);
     setLeads([]);
+    setPulled(false);
     try {
       const r = await axios.get(`/api/leads/${id}/pull`, { params: { start_date: startDate, end_date: endDate } });
       setLeads(r.data.leads || []);
+      setPulled(true);
       addToast(`Pulled ${r.data.count} lead(s)`, 'success');
     } catch (e) {
       addToast(e.response?.data?.error || 'Failed to pull leads', 'error');
@@ -96,7 +99,10 @@ export default function Leads() {
           </table>
         </div>
       ) : (
-        !loading && <p className="bb-muted">Select a date range and click Pull Leads to view submissions.</p>
+        !loading && (pulled
+        ? <p className="bb-muted">No leads found for this date range.</p>
+        : <p className="bb-muted">Select a date range and click Pull Leads to view submissions.</p>
+      )
       )}
     </div>
   );
