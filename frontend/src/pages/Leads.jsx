@@ -6,7 +6,7 @@ import { useToast } from '../components/Toast';
 
 export default function Leads() {
   const { id } = useParams();
-  const { addToast } = useToast();
+  const toast = useToast();
   const [account, setAccount] = useState(null);
   const [leads, setLeads] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -33,9 +33,9 @@ export default function Leads() {
       const r = await axios.get(`/api/leads/${id}/pull`, { params: { start_date: startDate, end_date: endDate } });
       setLeads(r.data.leads || []);
       setPulled(true);
-      addToast(`Pulled ${r.data.count} lead(s)`, 'success');
+      toast.success(`Pulled ${r.data.count} lead(s)`);
     } catch (e) {
-      addToast(e.response?.data?.error || 'Failed to pull leads', 'error');
+      toast.error(e.response?.data?.error || 'Failed to pull leads');
     } finally {
       setLoading(false);
     }
