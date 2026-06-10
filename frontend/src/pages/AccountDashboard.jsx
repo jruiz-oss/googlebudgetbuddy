@@ -34,6 +34,17 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
 function fmt(n) { return '$' + Math.round(n || 0).toLocaleString('en-US'); }
 function fmtPct(n) { return (n > 0 ? '+' : '') + (n || 0).toFixed(1) + '%'; }
 function fmtPlainPct(n) { return (n || 0).toFixed(1) + '%'; }
+function timeAgo(isoStr) {
+  if (!isoStr) return null;
+  const diffMs = Date.now() - new Date(isoStr + 'Z').getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1)   return 'just now';
+  if (mins < 60)  return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24)   return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
 }
@@ -677,7 +688,7 @@ export default function AccountDashboard({ onPacingComplete }) {
     ? segments.some(segNeedsApply)
     : Math.abs(displayRec - currentDailyTotal) > APPLY_THRESHOLD;
   const hasSheetId = Boolean(account.settings?.google_sheet_id);
-  const lastSyncStr = lastSync ? (() => { const mins = Math.round((Date.now() - lastSync) / 60000); return mins < 1 ? 'just now' : `${mins}m ago`; })() : 'not yet this session';
+  const lastSyncStr = timeAgo(account?.last_pacing_run_at) ?? (lastSync ? (() => { const mins = Math.round((Date.now() - lastSync) / 60000); return mins < 1 ? 'just now' : `${mins}m ago`; })() : 'never');
 
   return (
     <div>
@@ -702,6 +713,12 @@ export default function AccountDashboard({ onPacingComplete }) {
             <span style={{ color: 'var(--line-2)' }}>·</span>
             <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
             <TrendBadge todayDelta={pace.deltaPct} prevDeltaPct={prevDeltaPct} inline />
+            {account.last_pacing_run_at && (
+              <>
+                <span style={{ color: 'var(--line-2)' }}>·</span>
+                <span style={{ color: 'var(--muted)', fontSize: 'var(--t-sm)' }}>synced {timeAgo(account.last_pacing_run_at)}</span>
+              </>
+            )}
           </div>
         </div>
         <div className="dactions">

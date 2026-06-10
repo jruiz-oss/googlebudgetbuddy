@@ -391,6 +391,13 @@ class Account(db.Model):
         else:
             status_category = 'on_track'
 
+        last_run = (
+            PacingRun.query
+            .filter_by(account_id=self.id)
+            .order_by(PacingRun.run_at.desc())
+            .first()
+        )
+
         return {
             'id': self.id,
             'user_id': self.user_id,
@@ -402,6 +409,7 @@ class Account(db.Model):
             'total_monthly_budget': round(total_monthly_budget, 2),
             'mtd_spend': round(total_mtd_spend, 2),
             'latest_pacing_date': latest_date.isoformat() if latest_date else None,
+            'last_pacing_run_at': last_run.run_at.isoformat() if last_run and last_run.run_at else None,
             'segment_summaries': segments,
             'status_category': status_category,
             'pacing_status': {

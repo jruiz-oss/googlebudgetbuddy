@@ -43,6 +43,17 @@ function fmtPlainPct(n) {
   if (n == null || isNaN(n)) return '0.0%';
   return n.toFixed(1) + '%';
 }
+function timeAgo(isoStr) {
+  if (!isoStr) return null;
+  const diffMs = Date.now() - new Date(isoStr + 'Z').getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1)   return 'just now';
+  if (mins < 60)  return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24)   return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
+}
 function currentDaily(c) {
   return c.latest_pacing?.current_daily_budget ?? c.current_daily_budget ?? 0;
 }
@@ -345,10 +356,17 @@ function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply,
 
       <div className="card-foot" onClick={e => e.stopPropagation()}>
         <span className="label-sm">cap at 100%</span>
-        <Switch
-          on={capStates[account.id] ?? Boolean(account.settings?.auto_pause_enabled)}
-          onChange={(v) => setCap(account.id, v)}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {account.last_pacing_run_at && (
+            <span className="label-sm" style={{ color: 'var(--muted)', fontWeight: 400 }}>
+              synced {timeAgo(account.last_pacing_run_at)}
+            </span>
+          )}
+          <Switch
+            on={capStates[account.id] ?? Boolean(account.settings?.auto_pause_enabled)}
+            onChange={(v) => setCap(account.id, v)}
+          />
+        </div>
       </div>
     </div>
   );
