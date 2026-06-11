@@ -85,12 +85,12 @@ function uniqueCampaigns(campaigns) {
   return [...byKey.values()];
 }
 
-// Status label/class from a pace result. Under-pacing reads green (it's safe);
-// only meaningful over-pace turns amber/red.
+// Status label/class from a pace result. Both over and under trigger amber/red.
 function paceInfo(pace) {
-  const d   = pace.deltaPct;
-  const cls = d > 10 ? 'over' : d > 5 ? 'warn' : 'ok';
-  const pct = Math.abs(Math.round(d));
+  const d    = pace.deltaPct;
+  const abs  = Math.abs(d);
+  const cls  = abs > 10 ? 'over' : abs > 5 ? 'warn' : 'ok';
+  const pct  = Math.round(abs);
   const text = pct < 1 ? 'on pace' : `${pct}% ${d < 0 ? 'under' : 'over'}`;
   const arrow = pct < 1 ? '' : d < 0 ? '↗' : '↘';
   return { cls, text, arrow };
@@ -376,7 +376,7 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
           <span className="parent-name">
             <span className="seg-chevron">{open ? '▾' : '▸'}</span>
             {seg.name}
-            <span className="seg-count">{seg.children.length}</span>
+            <span className="seg-count">({seg.children.length})</span>
           </span>
         </td>
         <td><span className="mode-badge">SEG</span></td>
