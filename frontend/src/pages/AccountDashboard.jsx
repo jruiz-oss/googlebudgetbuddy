@@ -511,13 +511,12 @@ export default function AccountDashboard({ onPacingComplete }) {
     }));
   };
 
-  const handleConfirmApply = async (item) => {
+  // Direct apply — no modal. Works for bulk (all segments) or single segment/account.
+  const applyDirect = async (item) => {
     setApplyItem(null);
     setApplying(true);
     try {
       if (item.bulk) {
-        // Bulk apply: backend recs already preserve each campaign's current
-        // daily-budget ratio. If no run is loaded, preserve ratios in the UI.
         const { daysIn: di, daysInMonth: dim } = getDaysInfo();
         const adjustments = recommendations.length
           ? recommendations.map(r => ({
@@ -539,40 +538,26 @@ export default function AccountDashboard({ onPacingComplete }) {
         toast.success(r.data.message);
       } else {
         // Single-budget or per-segment apply.
-        // item.segmentOf is set when this is a per-segment row; item.name is the segment label.
-        // For single-budget accounts item.segmentOf is undefined — use all campaigns.
         const segLabel = item.segmentOf ? normLabel(item.name) : null;
         const eligible = uniqueCampaigns(campaigns).filter(c =>
           c.budget_resource_name &&
-          // Prefer google_status (live API value) over is_active (stale DB flag).
-          // is_active can be False for ENABLED campaigns that haven't re-synced.
           (c.google_status === 'ENABLED' || c.is_active) &&
           (segLabel === null || normLabel(c.budget_label) === segLabel)
         );
-
         if (!eligible.length) {
           toast.warn('No active campaigns have a budget resource name — run pacing first to populate them.');
           return;
         }
-
-        // Always derive the rec from the live frontend formula (item.rec was set
-        // by the Apply button from displayRec = pace.dailyRec). Never read from
-        // c.latest_pacing.recommended_daily_budget — the apply patch overwrites
-        // that field with the last-applied amount, so it becomes stale and can
-        // return the current budget instead of the fresh recommendation.
         const { daysIn: di, daysInMonth: dim } = getDaysInfo();
         const recToUse = item.rec != null ? item.rec : computePace(item.monthly, item.spend, di, dim).dailyRec;
         const adjustments = allocateByCurrentShare(eligible, recToUse);
-
         const r = await axios.post(`/api/pacing/${id}/apply`, { adjustments });
         applyOptimisticUpdate(adjustments);
         const { applied = [], errors = [] } = r.data;
         if (errors.length > 0 && applied.length === 0) {
-          const reason = errors[0]?.error || 'unknown error';
-          toast.error(`All ${errors.length} failed: ${reason}`);
+          toast.error(`All ${errors.length} failed: ${errors[0]?.error || 'unknown error'}`);
         } else if (errors.length > 0) {
-          const reason = errors[0]?.error || 'unknown error';
-          toast.error(`${applied.length} updated, ${errors.length} failed: ${reason}`);
+          toast.error(`${applied.length} updated, ${errors.length} failed: ${errors[0]?.error || 'unknown error'}`);
         } else {
           toast.success(r.data.message || `${eligible.length} budget(s) updated in Google Ads`);
           if (item.segmentOf) {
@@ -587,6 +572,9 @@ export default function AccountDashboard({ onPacingComplete }) {
       setApplying(false);
     }
   };
+
+  // Keep handleConfirmApply as alias so the modal path still works if ever re-used.
+  const handleConfirmApply = applyDirect;
 
   const toggleCap = async (v) => {
     setCapOn(v);
@@ -729,10 +717,10 @@ export default function AccountDashboard({ onPacingComplete }) {
           <button className="btn small" onClick={runPacing} disabled={running}><Play size={13} /> {running ? 'Running…' : 'Run Pacing'}</button>
           {isSegmented
             ? needsApply
-              ? <button className="btn primary" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>{applying ? 'Applying…' : 'Apply all recommended'}</button>
+              ? <button className="btn primary" onClick={() => applyDirect({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>{applying ? 'Applying…' : 'Apply all recommended'}</button>
               : <button className="btn ghost" disabled style={{ opacity: 0.5 }}>✓ Budgets applied</button>
             : needsApply
-              ? <button className="btn primary" onClick={() => setApplyItem({ name: account.account_name, monthly, spend, rec: displayRec })}>Set daily to {fmt(displayRec)}</button>
+              ? <button className="btn primary" onClick={() => applyDirect({ name: account.account_name, monthly, spend, rec: displayRec })} disabled={applying}>{applying ? 'Applying…' : `Set daily to ${fmt(displayRec)}`}</button>
               : <button className="btn ghost" disabled style={{ opacity: 0.5 }}>✓ Budgets applied</button>}
         </div>
       </div>
@@ -771,7 +759,7 @@ export default function AccountDashboard({ onPacingComplete }) {
           <div className="panel-head" style={{ padding: '14px 16px 0' }}>
             <div><h3>Segments</h3><div className="ph-desc">{isSegmented ? `${segments.length} segments · click Apply to push recommended daily` : 'Single-budget account'}</div></div>
             {isSegmented && (needsApply
-              ? <button className="btn ghost small" onClick={() => setApplyItem({ bulk: true, accountName: account.account_name, segments })}>Apply all</button>
+              ? <button className="btn ghost small" onClick={() => applyDirect({ bulk: true, accountName: account.account_name, segments })} disabled={applying}>Apply all</button>
               : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓ All applied</span>
             )}
           </div>
@@ -826,7 +814,7 @@ export default function AccountDashboard({ onPacingComplete }) {
                           {appliedSegs.has(normLabel(s.name))
                             ? <span style={{ fontSize: 'var(--t-sm)', color: 'var(--green)' }}>✓ Applied</span>
                             : segApplyNeeded
-                              ? <button className="btn primary small" onClick={() => setApplyItem({ name: s.name, monthly: s.monthly, spend: s.spend, currentDaily: s.currentDaily, segmentOf: account.account_name })}>Apply</button>
+                              ? <button className="btn primary small" disabled={applying} onClick={() => applyDirect({ name: s.name, monthly: s.monthly, spend: s.spend, currentDaily: s.currentDaily, segmentOf: account.account_name })}>Apply</button>
                               : <span style={{ fontSize: 'var(--t-sm)', color: 'var(--muted)' }}>✓</span>
                           }
                         </td>
@@ -934,29 +922,6 @@ export default function AccountDashboard({ onPacingComplete }) {
         )}
       </div>
 
-      {/* Raw recommendations table (kept for completeness) */}
-      {recommendations.length > 0 && (
-        <div className="bb-card" style={{ marginTop: 14 }}>
-          <div style={{ fontFamily: "'Inter Tight', sans-serif", fontWeight: 600, fontSize: 'var(--t-lg)', marginBottom: 10 }}>Campaign Budget Allocations</div>
-          <table className="bb-table">
-            <thead><tr><th>Campaign</th><th>Campaign MTD</th><th>Segment Pace</th><th>Current Daily</th><th>Rec Daily</th><th>Change</th></tr></thead>
-            <tbody>
-              {recommendations.map(rec => (
-                <tr key={rec.campaign_id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${rec.campaign_id}`)}>
-                  <td style={{ fontWeight: 500 }}>{rec.campaign_name}</td>
-                  <td>{fmt(rec.actual_spend)}</td>
-                  <td>{(rec.pace_ratio * 100).toFixed(1)}%</td>
-                  <td>{fmt(rec.current_daily_budget)}</td>
-                  <td style={{ fontWeight: 700 }}>{fmt(rec.recommended_daily_budget)}</td>
-                  <td style={{ color: rec.change_percent > 0 ? 'var(--amber)' : rec.change_percent < 0 ? 'var(--red)' : 'var(--muted)' }}>
-                    {rec.change_percent > 0 ? '+' : ''}{rec.change_percent?.toFixed(1)}%
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
 
       {showImport && <ImportCampaignsModal account={account} onClose={() => setShowImport(false)} onImported={() => { setShowImport(false); load(); }} />}
       {applyItem  && <ApplyModal item={applyItem} onClose={() => setApplyItem(null)} onConfirm={handleConfirmApply} />}
