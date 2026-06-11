@@ -353,7 +353,6 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
       </tr>
 
       {seg.children.map(child => {
-        const info     = paceInfo(child.pace);
         const recDelta = child.current > 0 ? ((child.rec / child.current) - 1) * 100 : 0;
         return (
           <tr className="ac-row child" key={campaignKey(child.campaign)} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${child.campaign.id}`)}>
@@ -380,7 +379,7 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
                 </div>
               ) : <span className="dim">{child.current > 0 ? fmt2(child.rec) : '—'}</span>}
             </td>
-            <td><span className={`pill ${info.cls}`}>{info.arrow} {info.text}</span></td>
+            <td><span className="dim">—</span></td>
             <td className="col-action"><span className="action-done">—</span></td>
           </tr>
         );
