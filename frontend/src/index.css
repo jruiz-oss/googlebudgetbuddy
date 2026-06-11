@@ -1671,7 +1671,8 @@ html, body {
 .acct-chevron:hover { background: var(--bg-2); color: var(--ink); }
 
 /* ── Table ── */
-.ac-table { width: 100%; border-collapse: collapse; border-top: 1px solid var(--line); }
+.ac-table-wrap { overflow-x: auto; max-width: 100%; }
+.ac-table { width: 100%; border-collapse: collapse; border-top: 1px solid var(--line); min-width: 700px; }
 .ac-table thead th {
   font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase;
   color: var(--muted); text-align: left; padding: 6px 12px;

@@ -251,7 +251,7 @@ function StatCards({ accounts, tables, daysIn, daysInMonth, dayOfMonth, attentio
 // ── Account group (header + nested table) ────────────────────────────────────
 const SEG_COLORS = ['#2563eb', '#7c3aed', '#0891b2', '#c2410c', '#15803d', '#be185d'];
 
-function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onSkip, onApplyOne, onApplyAll, navigate }) {
+function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onSkip, onApplyOne, onApplySeg, onApplyAll, navigate }) {
   const actionable = table.segments.reduce(
     (n, s) => n + s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length, 0);
   const accentColor = SEG_COLORS[index % SEG_COLORS.length];
@@ -292,6 +292,7 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
       </div>
 
       {!collapsed && (
+        <div className="ac-table-wrap">
         <table className="ac-table">
           <thead>
             <tr>
@@ -318,20 +319,20 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
                   segInfo={segInfo}
                   segActionable={segActionable}
                   skipped={skipped}
-                  onSkip={onSkip}
-                  onApplyOne={onApplyOne}
+                  onApplySeg={onApplySeg}
                   navigate={navigate}
                 />
               );
             })}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );
 }
 
-function SegmentRows({ account, seg, segInfo, segActionable, skipped, onSkip, onApplyOne, navigate }) {
+function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg, navigate }) {
   return (
     <>
       <tr className="ac-row parent">
@@ -344,18 +345,18 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onSkip, on
         <td className="num mono dim">—</td>
         <td><span className={`pill ${segInfo.cls}`}>{segInfo.arrow} {segInfo.text}</span></td>
         <td className="col-action">
-          <button className="btn-perset" onClick={() => navigate(`/accounts/${account.id}`)}>
-            per campaign <ArrowRight size={11} />
-          </button>
+          {segActionable > 0
+            ? <button className="btn-apply" onClick={() => onApplySeg(account, seg)}><Check size={12} /> Apply ({segActionable})</button>
+            : <span className="action-done">✓</span>
+          }
         </td>
       </tr>
 
       {seg.children.map(child => {
         const info     = paceInfo(child.pace);
-        const isSkipped = skipped.has(child.campaign.id);
         const recDelta = child.current > 0 ? ((child.rec / child.current) - 1) * 100 : 0;
         return (
-          <tr className="ac-row child" key={campaignKey(child.campaign)}>
+          <tr className="ac-row child" key={campaignKey(child.campaign)} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${child.campaign.id}`)}>
             <td className="col-name">
               <span className="child-name"><span className="child-arrow">↳</span>{child.name}</span>
             </td>
@@ -380,18 +381,7 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onSkip, on
               ) : <span className="dim">{child.current > 0 ? fmt2(child.rec) : '—'}</span>}
             </td>
             <td><span className={`pill ${info.cls}`}>{info.arrow} {info.text}</span></td>
-            <td className="col-action">
-              {child.needsApply && !isSkipped ? (
-                <div className="action-pair">
-                  <button className="btn-apply" onClick={() => onApplyOne(account, child)}><Check size={12} /> Apply</button>
-                  <button className="btn-skip" onClick={() => onSkip(child.campaign.id)}>Skip</button>
-                </div>
-              ) : isSkipped ? (
-                <span className="action-done">skipped</span>
-              ) : (
-                <span className="action-done">— </span>
-              )}
-            </td>
+            <td className="col-action"><span className="action-done">—</span></td>
           </tr>
         );
       })}
@@ -688,6 +678,10 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   };
 
   const handleApplyOne = (account, child) => pushAdjustments(account, [child]);
+  const handleApplySeg = (account, seg) => {
+    const rows = seg.children.filter(c => c.needsApply && !skipped.has(c.campaign.id));
+    pushAdjustments(account, rows);
+  };
   const handleApplyAll = (account, table) => {
     const rows = [];
     for (const s of table.segments)
@@ -797,6 +791,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
               skipped={skipped}
               onSkip={skipCampaign}
               onApplyOne={handleApplyOne}
+              onApplySeg={handleApplySeg}
               onApplyAll={handleApplyAll}
               navigate={navigate}
             />
