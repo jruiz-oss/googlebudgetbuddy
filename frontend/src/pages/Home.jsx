@@ -98,6 +98,23 @@ function paceInfo(pace) {
 
 const APPLY_THRESHOLD = 1.0;
 
+function trendDirection(todayDelta, prevDelta) {
+  if (prevDelta == null) return null;
+  const diff = Math.abs(todayDelta) - Math.abs(prevDelta);
+  if (diff < -0.5) return 'improving';
+  if (diff >  0.5) return 'worsening';
+  return 'stable';
+}
+function TrendBadge({ todayDelta, prevDeltaPct }) {
+  if (prevDeltaPct == null) return null;
+  const dir = trendDirection(todayDelta, prevDeltaPct);
+  if (!dir) return null;
+  const icon  = dir === 'improving' ? '↑' : dir === 'worsening' ? '↓' : '→';
+  const label = dir === 'improving' ? 'Improving' : dir === 'worsening' ? 'Worsening' : 'Stable';
+  const wasStr = (prevDeltaPct > 0 ? '+' : '') + prevDeltaPct.toFixed(1) + '%';
+  return <span className={`trend-badge ${dir}`}>{icon} {label} · was {wasStr}</span>;
+}
+
 // Build the Account → Segment → Campaign table model for one account.
 function buildAccountTable(account, daysIn, daysInMonth) {
   const all  = uniqueCampaigns(account.campaigns || []);
@@ -118,6 +135,7 @@ function buildAccountTable(account, daysIn, daysInMonth) {
   const segments = [...groups.values()].map(g => {
     const monthly      = g.campaigns.reduce((m, c) => Math.max(m, c.monthly_budget || 0), 0);
     const spend        = g.campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
+    const prevSpend    = g.campaigns.reduce((s, c) => s + (c.prev_pacing?.actual_spend || 0), 0);
     const currentTotal = g.campaigns.reduce((s, c) => s + currentDaily(c), 0);
     const pace         = computePace(monthly, spend, daysIn, daysInMonth);
 
@@ -139,7 +157,7 @@ function buildAccountTable(account, daysIn, daysInMonth) {
     }).sort((a, b) => b.spend - a.spend);
 
     return {
-      key: normLabel(g.name), name: g.name, monthly, spend,
+      key: normLabel(g.name), name: g.name, monthly, spend, prevSpend,
       currentTotal, pace, children, campaignCount: g.campaigns.length,
     };
   }).sort((a, b) => b.spend - a.spend);
@@ -251,7 +269,7 @@ function StatCards({ accounts, tables, daysIn, daysInMonth, dayOfMonth, attentio
 // ── Account group (header + nested table) ────────────────────────────────────
 const SEG_COLORS = ['#2563eb', '#7c3aed', '#0891b2', '#c2410c', '#15803d', '#be185d'];
 
-function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onSkip, onApplyOne, onApplySeg, onApplyAll, navigate }) {
+function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onSkip, onApplyOne, onApplySeg, onApplyAll, onManualBudget, navigate }) {
   const actionable = table.segments.reduce(
     (n, s) => n + s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length, 0);
   const accentColor = SEG_COLORS[index % SEG_COLORS.length];
@@ -320,6 +338,7 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
                   segActionable={segActionable}
                   skipped={skipped}
                   onApplySeg={onApplySeg}
+                  onManualBudget={onManualBudget}
                   navigate={navigate}
                 />
               );
@@ -332,19 +351,54 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
   );
 }
 
-function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg, navigate }) {
+function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg, onManualBudget, navigate }) {
+  const [open, setOpen]         = useState(false);
+  const [editingId, setEditing] = useState(null);
+  const [editVal, setEditVal]   = useState('');
+
+  const startEdit = (e, child) => {
+    e.stopPropagation();
+    setEditing(child.campaign.id);
+    setEditVal(child.current > 0 ? child.current.toFixed(2) : '');
+  };
+  const commitEdit = (child) => {
+    const val = parseFloat(editVal);
+    if (!isNaN(val) && val > 0 && val !== child.current) {
+      onManualBudget(account, child, val);
+    }
+    setEditing(null);
+  };
+
   return (
     <>
-      <tr className="ac-row parent">
-        <td className="col-name"><span className="parent-name">{seg.name}</span></td>
+      <tr className="ac-row parent seg-toggle" onClick={() => setOpen(o => !o)} style={{ cursor: 'pointer' }}>
+        <td className="col-name">
+          <span className="parent-name">
+            <span className="seg-chevron">{open ? '▾' : '▸'}</span>
+            {seg.name}
+            <span className="seg-count">{seg.children.length}</span>
+          </span>
+        </td>
         <td><span className="mode-badge">SEG</span></td>
         <td className="num mono">{fmt0(seg.monthly)}/mo</td>
         <td className="num mono">{fmt2(seg.spend)}</td>
         <td className="num mono pace-val">{seg.pace.ratio.toFixed(2)}x</td>
-        <td className="num mono dim">—</td>
-        <td className="num mono dim">—</td>
-        <td><span className={`pill ${segInfo.cls}`}>{segInfo.arrow} {segInfo.text}</span></td>
-        <td className="col-action">
+        <td className="num mono">{seg.currentTotal > 0 ? fmt2(seg.currentTotal) : <span className="dim">—</span>}</td>
+        <td className="num mono" style={{ fontWeight: 600 }}>{seg.pace.dailyRec > 0 ? fmt2(seg.pace.dailyRec) : <span className="dim">—</span>}</td>
+        <td>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <span className={`pill ${segInfo.cls}`}>{segInfo.arrow} {segInfo.text}</span>
+            {(() => {
+              const { daysIn: di, daysInMonth: dim } = getDaysInfo();
+              const prevDaysIn = Math.max(di - 1, 1);
+              const prevDelta = (seg.prevSpend > 0 && seg.monthly > 0)
+                ? computePace(seg.monthly, seg.prevSpend, prevDaysIn, dim).deltaPct
+                : null;
+              return <TrendBadge todayDelta={seg.pace.deltaPct} prevDeltaPct={prevDelta} />;
+            })()}
+          </div>
+        </td>
+        <td className="col-action" onClick={e => e.stopPropagation()}>
           {segActionable > 0
             ? <button className="btn-apply" onClick={() => onApplySeg(account, seg)}><Check size={12} /> Apply ({segActionable})</button>
             : <span className="action-done">✓</span>
@@ -352,11 +406,12 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
         </td>
       </tr>
 
-      {seg.children.map(child => {
-        const recDelta = child.current > 0 ? ((child.rec / child.current) - 1) * 100 : 0;
+      {open && seg.children.map(child => {
+        const recDelta  = child.current > 0 ? ((child.rec / child.current) - 1) * 100 : 0;
+        const isEditing = editingId === child.campaign.id;
         return (
-          <tr className="ac-row child" key={campaignKey(child.campaign)} style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${child.campaign.id}`)}>
-            <td className="col-name">
+          <tr className="ac-row child" key={campaignKey(child.campaign)}>
+            <td className="col-name" style={{ cursor: 'pointer' }} onClick={() => navigate(`/campaigns/${child.campaign.id}`)}>
               <span className="child-name"><span className="child-arrow">↳</span>{child.name}</span>
             </td>
             <td>
@@ -366,7 +421,25 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
             <td className="num mono">{fmt0(child.monthly)}/mo</td>
             <td className="num mono">{fmt2(child.spend)}</td>
             <td className="num mono pace-val">{child.pace.ratio.toFixed(2)}x</td>
-            <td className="num mono">{child.current > 0 ? fmt2(child.current) : '—'}</td>
+            <td className="num mono">
+              {isEditing ? (
+                <input
+                  className="daily-edit-input"
+                  autoFocus
+                  value={editVal}
+                  onChange={e => setEditVal(e.target.value)}
+                  onBlur={() => commitEdit(child)}
+                  onKeyDown={e => { if (e.key === 'Enter') commitEdit(child); if (e.key === 'Escape') setEditing(null); }}
+                  onClick={e => e.stopPropagation()}
+                />
+              ) : (
+                <span
+                  className="daily-editable"
+                  title="Click to edit"
+                  onClick={e => startEdit(e, child)}
+                >{child.current > 0 ? fmt2(child.current) : '—'}</span>
+              )}
+            </td>
             <td className="num mono">
               {child.needsApply ? (
                 <div className="rec-cell">
@@ -676,7 +749,28 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     }
   };
 
-  const handleApplyOne = (account, child) => pushAdjustments(account, [child]);
+  const handleApplyOne    = (account, child) => pushAdjustments(account, [child]);
+  const handleManualBudget = (account, child, newDaily) => {
+    if (!child.campaign.budget_resource_name) {
+      toast.warn('No budget resource name — run pacing first.');
+      return;
+    }
+    const adjustments = [{ campaign_id: child.campaign.id, budget_resource_name: child.campaign.budget_resource_name, new_daily_budget: newDaily }];
+    toast.info(`Setting ${child.name} daily to $${newDaily.toFixed(2)}…`);
+    axios.post(`/api/pacing/${account.id}/apply`, { adjustments })
+      .then(res => {
+        toast.success(res.data.message || 'Daily budget updated');
+        setAccounts(prev => prev.map(a => {
+          if (a.id !== account.id) return a;
+          return { ...a, campaigns: (a.campaigns || []).map(c =>
+            c.id === child.campaign.id
+              ? { ...c, current_daily_budget: newDaily, latest_pacing: c.latest_pacing ? { ...c.latest_pacing, current_daily_budget: newDaily } : c.latest_pacing }
+              : c
+          )};
+        }));
+      })
+      .catch(e => toast.error(e.response?.data?.error || 'Update failed'));
+  };
   const handleApplySeg = (account, seg) => {
     const rows = seg.children.filter(c => c.needsApply && !skipped.has(c.campaign.id));
     pushAdjustments(account, rows);
@@ -792,6 +886,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
               onApplyOne={handleApplyOne}
               onApplySeg={handleApplySeg}
               onApplyAll={handleApplyAll}
+              onManualBudget={handleManualBudget}
               navigate={navigate}
             />
           ))}
