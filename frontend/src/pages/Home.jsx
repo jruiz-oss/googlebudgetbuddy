@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, CloudDownload, Play, Search, ChevronRight, ArrowRight, Trash2 } from 'lucide-react';
+import { Plus, CloudDownload, Play, Search, ChevronRight, ChevronDown, ArrowRight, AlertTriangle, Check, Activity } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 
@@ -11,9 +11,6 @@ function getDaysInfo() {
   // Use yesterday's day number so ideal-spend and % DIFF calculations match the sheet.
   const daysIn      = Math.max(today.getDate() - 1, 1);
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  // Calendar day of the month for display (1 on the 1st). `daysIn` is floored
-  // to 1 for divide-by-zero safety, so it can't be used for the "day X of Y"
-  // label — that would show "day 2" on the 1st.
   const dayOfMonth  = today.getDate();
   return { daysIn, daysInMonth, dayOfMonth, daysLeft: daysInMonth - daysIn };
 }
@@ -28,20 +25,34 @@ function computePace(monthly, spend, daysIn, daysInMonth) {
   // Divide by days remaining so the daily rate actually reaches monthly budget by EOM.
   const dailyRec     = daysLeft > 0 ? Math.max(0, monthly - spend) / daysLeft : 0;
   const pctOfBudget  = monthly > 0 ? (spend / monthly) * 100 : 0;
-  return { idealSpend, deltaPct, pacePct: pctOfBudget, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
+  const ratio        = idealSpend > 0 ? spend / idealSpend : 0;
+  return { idealSpend, deltaPct, ratio, pacePct: pctOfBudget, status, daysLeft, dailyCurrent, dailyRec, pctOfBudget };
 }
 
-function fmt(n) {
+// ── Formatters ─────────────────────────────────────────────────────────────
+function fmt0(n) {
   if (n == null || isNaN(n)) return '$0';
   return '$' + Math.round(n).toLocaleString('en-US');
+}
+function fmt2(n) {
+  if (n == null || isNaN(n)) return '$0.00';
+  return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtK(n) {
+  if (n == null || isNaN(n)) return '$0';
+  const abs = Math.abs(n);
+  if (abs >= 10000) return '$' + Math.round(n / 1000).toLocaleString('en-US') + 'k';
+  if (abs >= 1000)  return '$' + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return '$' + Math.round(n).toLocaleString('en-US');
+}
+function compactMoney(n, cents) {
+  if (n == null || isNaN(n)) return cents ? '$0.00' : '$0';
+  if (Math.abs(n) >= 1000) return fmtK(n);
+  return cents ? fmt2(n) : fmt0(n);
 }
 function fmtPct(n) {
   if (n == null || isNaN(n)) return '0.0%';
   return (n > 0 ? '+' : '') + n.toFixed(1) + '%';
-}
-function fmtPlainPct(n) {
-  if (n == null || isNaN(n)) return '0.0%';
-  return n.toFixed(1) + '%';
 }
 function timeAgo(isoStr) {
   if (!isoStr) return null;
@@ -64,7 +75,6 @@ function campaignKey(c) {
 function normLabel(label) {
   return (label || 'Primary').trim().toLowerCase();
 }
-
 function uniqueCampaigns(campaigns) {
   const byKey = new Map();
   for (const c of campaigns || []) {
@@ -75,150 +85,70 @@ function uniqueCampaigns(campaigns) {
   return [...byKey.values()];
 }
 
-function getSegments(account) {
-  if (Array.isArray(account.segment_summaries) && account.segment_summaries.length) {
-    return account.segment_summaries.map(s => ({
-      name: s.name,
-      monthly: s.monthly || 0,
-      spend: s.spend || 0,
-      currentDaily: s.current_daily || 0,
-      campaignCount: s.campaign_count || 0,
-    }));
-  }
-  const campaigns = account.campaigns || [];
-  if (!campaigns.length) return [];
-  // Only use the most recent pacing run's data — older entries are stale.
-  const mostRecentDate = campaigns.reduce((latest, c) => {
+// Status label/class from a pace result. Under-pacing reads green (it's safe);
+// only meaningful over-pace turns amber/red.
+function paceInfo(pace) {
+  const d   = pace.deltaPct;
+  const cls = d > 10 ? 'over' : d > 5 ? 'warn' : 'ok';
+  const pct = Math.abs(Math.round(d));
+  const text = pct < 1 ? 'on pace' : `${pct}% ${d < 0 ? 'under' : 'over'}`;
+  const arrow = pct < 1 ? '' : d < 0 ? '↗' : '↘';
+  return { cls, text, arrow };
+}
+
+const APPLY_THRESHOLD = 1.0;
+
+// Build the Account → Segment → Campaign table model for one account.
+function buildAccountTable(account, daysIn, daysInMonth) {
+  const all  = uniqueCampaigns(account.campaigns || []);
+  const mostRecentDate = all.reduce((latest, c) => {
     const d = c.latest_pacing?.date;
     if (!d) return latest;
     return !latest || d > latest ? d : latest;
   }, null);
-  const map = {};
-  const seenGids = new Set();
-  for (const c of uniqueCampaigns(campaigns)) {
-    if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) continue;
-    const rawLabel = c.budget_label || 'Primary';
-    const labelKey = normLabel(rawLabel);
-    if (!map[labelKey]) map[labelKey] = { name: rawLabel, monthly: 0, spend: 0 };
-    map[labelKey].monthly = Math.max(map[labelKey].monthly, c.monthly_budget || 0);
-    const key = campaignKey(c);
-    if (!seenGids.has(key)) {
-      seenGids.add(key);
-      map[labelKey].spend += c.latest_pacing?.actual_spend || 0;
-    }
+  const live = all.filter(c => !mostRecentDate || c.latest_pacing?.date === mostRecentDate);
+
+  const groups = new Map();
+  for (const c of live) {
+    const key = normLabel(c.budget_label);
+    if (!groups.has(key)) groups.set(key, { name: c.budget_label || 'Primary', campaigns: [] });
+    groups.get(key).campaigns.push(c);
   }
-  return Object.values(map);
-}
 
-// Compute yesterday's account-level pace from prev_pacing data across campaigns.
-// Returns {deltaPct, prevDaysIn} or null when no prev data exists.
-function accountPrevPacing(account, daysIn, daysInMonth) {
-  const campaigns = uniqueCampaigns(account.campaigns || []);
-  const hasPrev   = campaigns.some(c => c.prev_pacing);
-  if (!hasPrev) return null;
+  const segments = [...groups.values()].map(g => {
+    const monthly      = g.campaigns.reduce((m, c) => Math.max(m, c.monthly_budget || 0), 0);
+    const spend        = g.campaigns.reduce((s, c) => s + (c.latest_pacing?.actual_spend || 0), 0);
+    const currentTotal = g.campaigns.reduce((s, c) => s + currentDaily(c), 0);
+    const pace         = computePace(monthly, spend, daysIn, daysInMonth);
 
-  const prevDaysIn = Math.max(daysIn - 1, 1);
-  const seenGids   = new Set();
-  let prevSpend = 0;
-  for (const c of campaigns) {
-    if (!c.prev_pacing) continue;
-    const key = campaignKey(c);
-    if (seenGids.has(key)) continue;
-    seenGids.add(key);
-    prevSpend += c.prev_pacing.actual_spend || 0;
-  }
-  if (prevSpend <= 0) return null;
+    const children = g.campaigns.map(c => {
+      const share   = currentTotal > 0 ? currentDaily(c) / currentTotal : 1 / g.campaigns.length;
+      const cMonthly = monthly * share;
+      const cSpend   = c.latest_pacing?.actual_spend || 0;
+      const cCurrent = currentDaily(c);
+      const cRec     = pace.dailyRec * share;
+      const cPace    = computePace(cMonthly, cSpend, daysIn, daysInMonth);
+      const needsApply = Boolean(c.budget_resource_name) && c.is_active &&
+                         Math.abs(cRec - cCurrent) > APPLY_THRESHOLD;
+      return {
+        campaign: c,
+        name: c.campaign_name || c.name || 'Campaign',
+        share, monthly: cMonthly, spend: cSpend,
+        current: cCurrent, rec: cRec, pace: cPace, needsApply,
+      };
+    }).sort((a, b) => b.spend - a.spend);
 
-  const segBudgets = {};
-  for (const c of campaigns) {
-    const l = normLabel(c.budget_label);
-    segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
-  }
-  const monthly = typeof account.total_monthly_budget === 'number'
-    ? account.total_monthly_budget
-    : Object.values(segBudgets).reduce((s, b) => s + b, 0);
+    return {
+      key: normLabel(g.name), name: g.name, monthly, spend,
+      currentTotal, pace, children, campaignCount: g.campaigns.length,
+    };
+  }).sort((a, b) => b.spend - a.spend);
 
-  if (monthly <= 0) return null;
-  const prevPace = computePace(monthly, prevSpend, prevDaysIn, daysInMonth);
-  return { deltaPct: prevPace.deltaPct, prevDaysIn };
-}
-
-// Returns 'improving' | 'worsening' | 'stable' | null
-function trendDirection(todayDelta, prevDelta) {
-  if (prevDelta == null) return null;
-  const diff = Math.abs(todayDelta) - Math.abs(prevDelta);
-  if (diff < -0.5) return 'improving';
-  if (diff >  0.5) return 'worsening';
-  return 'stable';
-}
-
-function TrendBadge({ todayDelta, prevPace }) {
-  if (!prevPace) return null;
-  const dir = trendDirection(todayDelta, prevPace.deltaPct);
-  if (!dir) return null;
-  const icon  = dir === 'improving' ? '↑' : dir === 'worsening' ? '↓' : '→';
-  const label = dir === 'improving' ? 'Improving' : dir === 'worsening' ? 'Worsening' : 'Stable';
-  return (
-    <span className={`trend-badge ${dir}`}>
-      {icon} {label} · was {fmtPct(prevPace.deltaPct)}
-    </span>
-  );
-}
-
-function accountPacing(account, daysIn, daysInMonth) {
-  const campaigns = account.campaigns || [];
-  const segBudgets = {};
-  for (const c of uniqueCampaigns(campaigns)) {
-    const l = normLabel(c.budget_label);
-    segBudgets[l] = Math.max(segBudgets[l] || 0, c.monthly_budget || 0);
-  }
-  const monthly = typeof account.total_monthly_budget === 'number'
-    ? account.total_monthly_budget
-    : Object.values(segBudgets).reduce((s, b) => s + b, 0);
-  // Only sum spend from the most recent pacing run (avoid stale campaigns).
-  // Also dedup by google_campaign_id to handle duplicate DB rows.
-  const mostRecentDate = campaigns.reduce((latest, c) => {
-    const d = c.latest_pacing?.date;
-    if (!d) return latest;
-    return !latest || d > latest ? d : latest;
-  }, null);
-  const seenGids = new Set();
-  const spend = typeof account.mtd_spend === 'number'
-    ? account.mtd_spend
-    : campaigns.reduce((s, c) => {
-      if (mostRecentDate && c.latest_pacing?.date !== mostRecentDate) return s;
-      const key = campaignKey(c);
-      if (seenGids.has(key)) return s;
-      seenGids.add(key);
-      return s + (c.latest_pacing?.actual_spend || 0);
-    }, 0);
+  const monthly = segments.reduce((s, x) => s + x.monthly, 0);
+  const spend   = segments.reduce((s, x) => s + x.spend, 0);
   const pace    = computePace(monthly, spend, daysIn, daysInMonth);
-  const segments = getSegments(account);
-  return { monthly, spend, pace, segments };
-}
-
-// ── HiFi Switch ──────────────────────────────────────────────────────────
-function Switch({ on, onChange }) {
-  return (
-    <label className="switch" onClick={e => e.stopPropagation()}>
-      <input type="checkbox" checked={on} onChange={e => onChange(e.target.checked)} />
-      <span className="switch-track" />
-      <span className="switch-knob" />
-    </label>
-  );
-}
-
-// ── Pace bar ─────────────────────────────────────────────────────────────
-function PaceBar({ spend, monthly, daysIn, daysInMonth, status }) {
-  const pct      = monthly > 0 ? Math.min((spend / monthly) * 100, 100) : 0;
-  const idealPct = Math.min((daysIn / daysInMonth) * 100, 99);
-  const fillColor = status === 'over' ? 'var(--red)' : status === 'warn' ? 'var(--amber)' : 'var(--green)';
-  return (
-    <div className="pace-bar-wrap">
-      <div className="pace-bar-fill" style={{ width: `${pct}%`, background: fillColor }} />
-      <div className="pace-bar-tick" style={{ left: `${idealPct}%` }} />
-    </div>
-  );
+  const hidden  = Math.max(all.length - live.length, 0);
+  return { segments, monthly, spend, pace, hidden, totalCampaigns: live.length };
 }
 
 // ── Apply Modal ──────────────────────────────────────────────────────────
@@ -227,40 +157,9 @@ function ApplyModal({ item, onClose, onConfirm }) {
   const { daysIn, daysInMonth, daysLeft } = getDaysInfo();
   const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
   const current   = item.currentDailyBudget ?? pace.dailyCurrent;
-  const rec       = pace.dailyRec;
+  const rec       = item.recOverride ?? pace.dailyRec;
   const diff      = Math.abs(rec - current);
   const direction = rec > current ? 'increase' : 'decrease';
-
-  if (item.bulk) {
-    return (
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
-          <h3>Apply all recommended daily budgets</h3>
-          <div className="subtle">{item.name} · {item.segments.length} segments</div>
-          <table className="modal-seg-table">
-            <thead><tr><th>Segment</th><th>Now</th><th>New daily</th></tr></thead>
-            <tbody>
-              {item.segments.map(s => {
-                const sp = computePace(s.monthly, s.spend, daysIn, daysInMonth);
-                return (
-                  <tr key={s.name}>
-                    <td>{s.name}</td>
-                    <td>{fmt(sp.dailyCurrent)}</td>
-                    <td className="new-daily">{fmt(sp.dailyRec)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          <div className="mcopy">New daily budgets are calculated to spend each segment's remaining budget evenly across the {daysLeft} days left this month.</div>
-          <div className="footer-row">
-            <button className="btn ghost" onClick={onClose}>Cancel</button>
-            <button className="btn primary" onClick={() => onConfirm(item)}>Push {item.segments.length} updates to Google Ads</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -270,18 +169,18 @@ function ApplyModal({ item, onClose, onConfirm }) {
         <div className="diff-card">
           <div className="dcol from">
             <div className="dk">Current daily</div>
-            <div className="dv">{fmt(current)}</div>
+            <div className="dv">{fmt2(current)}</div>
           </div>
           <div className="darrow"><ArrowRight size={14} /></div>
           <div className="dcol">
             <div className="dk">New daily</div>
-            <div className="dv" style={{ color: 'var(--green)' }}>{fmt(rec)}</div>
+            <div className="dv" style={{ color: 'var(--green)' }}>{fmt2(rec)}</div>
           </div>
         </div>
         <div className="mcopy">
           {direction === 'increase'
-            ? `An increase of ${fmt(diff)}/day to catch up to the monthly target.`
-            : `A decrease of ${fmt(diff)}/day to stay within the monthly target.`}{' '}
+            ? `An increase of ${fmt2(diff)}/day to catch up to the monthly target.`
+            : `A decrease of ${fmt2(diff)}/day to stay within the monthly target.`}{' '}
           Calculated over the remaining {daysLeft} days of the month.
         </div>
         <div className="footer-row">
@@ -293,133 +192,210 @@ function ApplyModal({ item, onClose, onConfirm }) {
   );
 }
 
-// ── Account Card ─────────────────────────────────────────────────────────
-function AccountCard({ account, daysIn, daysInMonth, capStates, setCap, onApply, navigate }) {
-  const { monthly, spend, pace, segments } = accountPacing(account, daysIn, daysInMonth);
-  const prevPace    = accountPrevPacing(account, daysIn, daysInMonth);
-  const isSegmented = segments.length > 1;
-
-  // Current daily budget total (Google Ads budget setting, not average spend rate).
-  // Used to hide the Apply button once rec ≈ current (i.e. budget was just applied).
-  const APPLY_THRESHOLD = 1.0;
-  const currentDailyBudget = uniqueCampaigns(account.campaigns || []).reduce((s, c) => s + currentDaily(c), 0);
-  const needsApply = !isSegmented && Math.abs(pace.dailyRec - currentDailyBudget) > APPLY_THRESHOLD;
-
-  const handleCTA = (e) => {
-    e.stopPropagation();
-    if (isSegmented) {
-      navigate(`/accounts/${account.id}`);
-    } else {
-      // Pass accountId and campaigns so the confirm handler can build adjustments
-      onApply({ name: account.account_name, accountId: account.id, campaigns: account.campaigns || [], monthly, spend, currentDailyBudget });
+// ── Stat cards ─────────────────────────────────────────────────────────────
+function StatCards({ accounts, tables, daysIn, daysInMonth, dayOfMonth, attention }) {
+  const totals = useMemo(() => {
+    let monthly = 0, spend = 0, ideal = 0, campaigns = 0, segments = 0;
+    for (const a of accounts) {
+      const t = tables.get(a.id);
+      if (!t) continue;
+      monthly   += t.monthly;
+      spend     += t.spend;
+      ideal     += t.pace.idealSpend;
+      campaigns += t.totalCampaigns;
+      segments  += t.segments.length;
     }
-  };
+    const delta = ideal > 0 ? ((spend / ideal) - 1) * 100 : 0;
+    const pctOfBudget = monthly > 0 ? (spend / monthly) * 100 : 0;
+    return { monthly, spend, campaigns, segments, delta, pctOfBudget };
+  }, [accounts, tables]);
+
+  const paceWord = Math.abs(totals.delta) <= 5 ? 'pacing on track'
+    : totals.delta > 5 ? 'pacing over budget' : 'pacing under budget';
+  const paceCls  = Math.abs(totals.delta) <= 5 ? 'ok' : totals.delta > 5 ? 'over' : 'under';
 
   return (
-    <div className={`account-card ${pace.status}`} onClick={() => navigate(`/accounts/${account.id}`)}>
-      <div className="card-inner">
-        <div className="card-head">
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="card-name" title={account.account_name}>{account.account_name}</div>
-            <div className="card-meta">{isSegmented ? `${segments.length} segments` : 'single budget'}</div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-            <span className={`pill ${pace.status}`}>{fmtPct(pace.deltaPct)}</span>
-            <TrendBadge todayDelta={pace.deltaPct} prevPace={prevPace} />
-          </div>
-        </div>
-
-        <PaceBar spend={spend} monthly={monthly} daysIn={daysIn} daysInMonth={daysInMonth} status={pace.status} />
-
-        <div className="card-stats">
-          <span className="sk">MTD spend</span>
-          <span className="sv">{fmt(spend)} <span className="smuted">/ {fmt(monthly)}</span></span>
-          <span className="sk">Daily now</span>
-          <span className="sv">{fmt(currentDailyBudget)}</span>
-          <span className="sk">Daily rec</span>
-          <span className="sv rec">{fmt(pace.dailyRec)}</span>
-        </div>
-
-        <button
-          className={`card-cta ${isSegmented ? 'outline' : needsApply ? 'primary' : 'ghost'}`}
-          onClick={isSegmented || needsApply ? handleCTA : e => e.stopPropagation()}
-          disabled={!isSegmented && !needsApply}
-          style={!isSegmented && !needsApply ? { opacity: 0.55, cursor: 'default' } : undefined}
-        >
-          {isSegmented
-            ? <><span>review {segments.length} segments</span><ChevronRight size={13} /></>
-            : needsApply
-              ? <span>set daily to {fmt(pace.dailyRec)}</span>
-              : <span>✓ budget applied</span>}
-        </button>
+    <div className="statcards">
+      <div className="statcard">
+        <div className="statcard-label">Monthly Budget</div>
+        <div className="statcard-value">{fmtK(totals.monthly)}</div>
+        <div className="statcard-sub">{totals.campaigns} campaigns · {accounts.length} accounts</div>
       </div>
 
-      <div className="card-foot" onClick={e => e.stopPropagation()}>
-        <span className="label-sm">cap at 100%</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {account.last_pacing_run_at && (
-            <span className="label-sm" style={{ color: 'var(--muted)', fontWeight: 400 }}>
-              synced {timeAgo(account.last_pacing_run_at)}
-            </span>
-          )}
-          <Switch
-            on={capStates[account.id] ?? Boolean(account.settings?.auto_pause_enabled)}
-            onChange={(v) => setCap(account.id, v)}
-          />
+      <div className="statcard">
+        <div className="statcard-label">Spend (MTD)</div>
+        <div className="statcard-value">{fmt2(totals.spend)}</div>
+        <div className="statcard-bar">
+          <div className="statcard-bar-fill" style={{ width: `${Math.min(totals.pctOfBudget, 100)}%` }} />
         </div>
+        <div className="statcard-sub">
+          {totals.pctOfBudget.toFixed(1)}% of budget · <span className={`pace-word ${paceCls}`}>{paceWord}</span>
+        </div>
+      </div>
+
+      <div className="statcard">
+        <div className="statcard-label">Tracked Units</div>
+        <div className="statcard-value">{totals.campaigns} <span className="statcard-value-sub">/ {totals.segments} segments</span></div>
+        <div className="statcard-sub">across {accounts.length} accounts</div>
+      </div>
+
+      <div className="statcard">
+        <div className="statcard-label">Needs Attention</div>
+        <div className={`statcard-value ${attention > 0 ? 'danger' : ''}`}>{attention}</div>
+        <div className="statcard-sub">pending recommendations</div>
       </div>
     </div>
   );
 }
 
-// ── Summary Bar ──────────────────────────────────────────────────────────
-function SummaryBar({ accounts, daysIn, daysInMonth, dayOfMonth }) {
-  const stats = useMemo(() => {
-    let totalMonthly = 0, totalSpend = 0, totalIdeal = 0, over = 0, under = 0;
-    for (const a of accounts) {
-      const { monthly, spend, pace } = accountPacing(a, daysIn, daysInMonth);
-      totalMonthly += monthly;
-      totalSpend   += spend;
-      totalIdeal   += pace.idealSpend;
-      if (pace.status === 'over')  over++;
-      if (pace.status === 'warn')  under++;
-    }
-    const portfolioDelta = totalIdeal > 0 ? ((totalSpend / totalIdeal) - 1) * 100 : 0;
-    // Portfolio pace shown as % DIFF (same formula as sheet col I) rather than % of budget used.
-    const portfolioPace = portfolioDelta;
-    const absPD   = Math.abs(portfolioDelta);
-    const pStatus = absPD > 10 ? 'over' : absPD > 5 ? 'warn' : 'green';
-    return { totalMonthly, totalSpend, totalIdeal, portfolioDelta, portfolioPace, pStatus, over, under };
-  }, [accounts, daysIn, daysInMonth]);
+// ── Account group (header + nested table) ────────────────────────────────────
+const SEG_COLORS = ['#2563eb', '#7c3aed', '#0891b2', '#c2410c', '#15803d', '#be185d'];
+
+function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onSkip, onApplyOne, onApplyAll, navigate }) {
+  const actionable = table.segments.reduce(
+    (n, s) => n + s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length, 0);
+  const accentColor = SEG_COLORS[index % SEG_COLORS.length];
+
+  const headerRight = (
+    <div className="acct-head-right">
+      <div className="acct-metric"><span className="acct-metric-k">BUDGET</span><span className="acct-metric-v">{compactMoney(table.monthly, false)}</span></div>
+      <div className="acct-metric"><span className="acct-metric-k">MTD</span><span className="acct-metric-v">{compactMoney(table.spend, true)}</span></div>
+      <div className="acct-metric"><span className="acct-metric-k">ACTIONABLE</span><span className={`acct-metric-v ${actionable > 0 ? 'danger' : ''}`}>{actionable}</span></div>
+      <button
+        className="btn-applyall"
+        disabled={actionable === 0}
+        onClick={(e) => { e.stopPropagation(); onApplyAll(account, table); }}
+      >
+        <Check size={13} /> Apply all ({actionable})
+      </button>
+      <button className="btn-dash" onClick={(e) => { e.stopPropagation(); navigate(`/accounts/${account.id}`); }}>
+        Dashboard <ArrowRight size={12} />
+      </button>
+      <button className="acct-chevron" onClick={(e) => { e.stopPropagation(); onToggle(account.id); }}>
+        {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+      </button>
+    </div>
+  );
 
   return (
-    <div className="summary">
-      <div className="cell">
-        <div className="k">Accounts</div>
-        <div className="v">{accounts.length}</div>
-        <div className="sub">day {dayOfMonth} / {daysInMonth} · {daysInMonth - dayOfMonth} days left</div>
+    <div className="acct-group">
+      <div className="acct-group-head" onClick={() => navigate(`/accounts/${account.id}`)}>
+        <span className="acct-bar" style={{ background: accentColor }} />
+        <div className="acct-head-id">
+          <div className="acct-name">{account.account_name}</div>
+          <div className="acct-meta">
+            Last run: <strong>{timeAgo(account.last_pacing_run_at) || 'never'}</strong>
+            {table.hidden > 0 && <> · {table.hidden} hidden</>}
+          </div>
+        </div>
+        {headerRight}
       </div>
-      <div className="cell">
-        <div className="k">Portfolio pace</div>
-        <div className={`v ${stats.pStatus}`}>{fmtPct(stats.portfolioPace)}</div>
-        <div className="sub">{fmt(stats.totalSpend)} / {fmt(stats.totalMonthly)}</div>
-      </div>
-      <div className="cell">
-        <div className="k">Monthly committed</div>
-        <div className="v">{fmt(stats.totalMonthly)}</div>
-        <div className="sub">{stats.totalMonthly > 0 ? ((stats.totalSpend / stats.totalMonthly) * 100).toFixed(0) : 0}% used</div>
-      </div>
-      <div className="cell">
-        <div className="k">Over pace</div>
-        <div className="v over">{stats.over}</div>
-        <div className="sub">crossed +5% threshold</div>
-      </div>
-      <div className="cell">
-        <div className="k">Under pace</div>
-        <div className="v under">{stats.under}</div>
-        <div className="sub">crossed −5% threshold</div>
-      </div>
+
+      {!collapsed && (
+        <table className="ac-table">
+          <thead>
+            <tr>
+              <th className="col-name">CAMPAIGN / SEGMENT</th>
+              <th>TYPE</th>
+              <th className="num">BUDGET</th>
+              <th className="num">MTD SPEND</th>
+              <th className="num">PACE</th>
+              <th className="num">CURRENT DAILY</th>
+              <th className="num">REC. DAILY</th>
+              <th>STATUS</th>
+              <th className="col-action">ACTION</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.segments.map(seg => {
+              const segInfo = paceInfo(seg.pace);
+              const segActionable = seg.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length;
+              return (
+                <SegmentRows
+                  key={seg.key}
+                  account={account}
+                  seg={seg}
+                  segInfo={segInfo}
+                  segActionable={segActionable}
+                  skipped={skipped}
+                  onSkip={onSkip}
+                  onApplyOne={onApplyOne}
+                  navigate={navigate}
+                />
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
+  );
+}
+
+function SegmentRows({ account, seg, segInfo, segActionable, skipped, onSkip, onApplyOne, navigate }) {
+  return (
+    <>
+      <tr className="ac-row parent">
+        <td className="col-name"><span className="parent-name">{seg.name}</span></td>
+        <td><span className="mode-badge">SEG</span></td>
+        <td className="num mono">{fmt0(seg.monthly)}/mo</td>
+        <td className="num mono">{fmt2(seg.spend)}</td>
+        <td className="num mono pace-val">{seg.pace.ratio.toFixed(2)}x</td>
+        <td className="num mono dim">—</td>
+        <td className="num mono dim">—</td>
+        <td><span className={`pill ${segInfo.cls}`}>{segInfo.arrow} {segInfo.text}</span></td>
+        <td className="col-action">
+          <button className="btn-perset" onClick={() => navigate(`/accounts/${account.id}`)}>
+            per campaign <ArrowRight size={11} />
+          </button>
+        </td>
+      </tr>
+
+      {seg.children.map(child => {
+        const info     = paceInfo(child.pace);
+        const isSkipped = skipped.has(child.campaign.id);
+        const recDelta = child.current > 0 ? ((child.rec / child.current) - 1) * 100 : 0;
+        return (
+          <tr className="ac-row child" key={campaignKey(child.campaign)}>
+            <td className="col-name">
+              <span className="child-name"><span className="child-arrow">↳</span>{child.name}</span>
+            </td>
+            <td>
+              <span className="share-badge">{Math.round(child.share * 100)}%</span>
+              <span className="mode-badge sub">camp</span>
+            </td>
+            <td className="num mono">{fmt0(child.monthly)}/mo</td>
+            <td className="num mono">{fmt2(child.spend)}</td>
+            <td className="num mono pace-val">{child.pace.ratio.toFixed(2)}x</td>
+            <td className="num mono">{child.current > 0 ? fmt2(child.current) : '—'}</td>
+            <td className="num mono">
+              {child.needsApply ? (
+                <div className="rec-cell">
+                  <span>{fmt2(child.rec)}</span>
+                  {Math.abs(recDelta) >= 0.1 && (
+                    <span className={`rec-delta ${recDelta >= 0 ? 'up' : 'down'}`}>
+                      {recDelta >= 0 ? '↑' : '↓'} {Math.abs(recDelta).toFixed(1)}%
+                    </span>
+                  )}
+                </div>
+              ) : <span className="dim">{child.current > 0 ? fmt2(child.rec) : '—'}</span>}
+            </td>
+            <td><span className={`pill ${info.cls}`}>{info.arrow} {info.text}</span></td>
+            <td className="col-action">
+              {child.needsApply && !isSkipped ? (
+                <div className="action-pair">
+                  <button className="btn-apply" onClick={() => onApplyOne(account, child)}><Check size={12} /> Apply</button>
+                  <button className="btn-skip" onClick={() => onSkip(child.campaign.id)}>Skip</button>
+                </div>
+              ) : isSkipped ? (
+                <span className="action-done">skipped</span>
+              ) : (
+                <span className="action-done">— </span>
+              )}
+            </td>
+          </tr>
+        );
+      })}
+    </>
   );
 }
 
@@ -558,15 +534,15 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   const [accounts, setAccounts]   = useState(propAccounts || []);
   const [loading, setLoading]     = useState(!propAccounts?.length);
   const [runningAll, setRunningAll] = useState(false);
-  const [syncPhase, setSyncPhase]   = useState(false); // true while campaign sync is running
+  const [syncPhase, setSyncPhase]   = useState(false);
   const [paceProgress, setPaceProgress] = useState({ completed: 0, total: 0 });
   const [showAdd, setShowAdd]     = useState(false);
   const [showMcc, setShowMcc]     = useState(false);
-  const [capStates, setCapStates] = useState({});
   const [applyItem, setApplyItem] = useState(null);
-  const [filter, setFilter]       = useState('all');
-  const [sort, setSort]           = useState('worst');
   const [q, setQ]                 = useState('');
+  const [collapsed, setCollapsed] = useState(new Set());
+  const [skipped, setSkipped]     = useState(new Set());
+  const [oldestFirst, setOldestFirst] = useState(false);
 
   useEffect(() => {
     if (propAccounts?.length) { setAccounts(propAccounts); setLoading(false); }
@@ -589,9 +565,35 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     finally { setLoading(false); }
   };
 
-  // Always load fresh on mount — propAccounts from App.jsx can be stale if the
-  // user ran pacing on an individual account then navigated back to the home page.
   useEffect(() => { load(); }, []);
+
+  // Build the table model once per accounts change.
+  const tables = useMemo(() => {
+    const m = new Map();
+    for (const a of accounts) m.set(a.id, buildAccountTable(a, daysIn, daysInMonth));
+    return m;
+  }, [accounts, daysIn, daysInMonth]);
+
+  const totalAttention = useMemo(() => {
+    let n = 0;
+    for (const a of accounts) {
+      const t = tables.get(a.id);
+      if (!t) continue;
+      for (const s of t.segments) n += s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length;
+    }
+    return n;
+  }, [accounts, tables, skipped]);
+
+  const accountsWithAttention = useMemo(() => {
+    let n = 0;
+    for (const a of accounts) {
+      const t = tables.get(a.id);
+      if (!t) continue;
+      const has = t.segments.some(s => s.children.some(c => c.needsApply && !skipped.has(c.campaign.id)));
+      if (has) n++;
+    }
+    return n;
+  }, [accounts, tables, skipped]);
 
   // Poll /run-all/status until pacing completes, then reload.
   const _pollPacingProgress = () => {
@@ -605,60 +607,40 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
         if (data.total > 0) setPaceProgress({ completed: data.completed, total: data.total });
         if (!data.running) {
           clearInterval(pollId);
-          setSyncPhase(false);
-          setRunningAll(false);
-          await load();
-          onAccountsChange?.();
+          setSyncPhase(false); setRunningAll(false);
+          await load(); onAccountsChange?.();
           toast.success('Sync & pacing complete — data updated!');
         } else if (elapsed >= MAX_WAIT_MS) {
           clearInterval(pollId);
-          setSyncPhase(false);
-          setRunningAll(false);
-          await load();
-          onAccountsChange?.();
+          setSyncPhase(false); setRunningAll(false);
+          await load(); onAccountsChange?.();
           toast.warn('Pacing is taking longer than expected — refreshed anyway.');
         }
       } catch {
         clearInterval(pollId);
-        setSyncPhase(false);
-        setRunningAll(false);
+        setSyncPhase(false); setRunningAll(false);
         await load();
       }
     }, POLL_MS);
   };
 
   const runAllPacing = async () => {
-    setRunningAll(true);
-    setSyncPhase(true);
+    setRunningAll(true); setSyncPhase(true);
     setPaceProgress({ completed: 0, total: accounts.length });
-
-    // Step 1: Fire campaign sync from MCC (skip_pacing=true so it doesn't
-    // also run pacing — we handle pacing below with progress tracking).
-    // This is fire-and-forget; we don't wait for it to complete because the
-    // campaign-sync phase is fast and the pacing step below runs after it.
     try {
       await axios.post('/api/accounts/sync-from-mcc', { skip_pacing: true });
     } catch (e) {
-      // 409 = already syncing (fine, continue to pacing).
-      // Any other error we log and continue — campaign sync failure shouldn't
-      // block pacing; worst case we pace with the existing campaign list.
-      if (e.response?.status !== 409) {
-        console.warn('Campaign sync skipped:', e.response?.data?.error || e.message);
-      }
+      if (e.response?.status !== 409) console.warn('Campaign sync skipped:', e.response?.data?.error || e.message);
     }
-
-    // Small buffer to let campaign-sync DB writes land before pacing reads them.
     await new Promise(resolve => setTimeout(resolve, 3000));
     setSyncPhase(false);
-
-    // Step 2: Run pacing for all accounts (includes sheet budget sync) and poll progress.
     try {
       await axios.post('/api/pacing/run-all');
       _pollPacingProgress();
     } catch (e) {
       if (e.response?.status === 409) {
         toast.warn('Pacing already in progress — dashboard will update when it finishes.');
-        _pollPacingProgress(); // still poll so button re-enables
+        _pollPacingProgress();
       } else {
         toast.error(e.response?.data?.error || 'Pacing failed');
         setRunningAll(false);
@@ -666,170 +648,131 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
     }
   };
 
-  const setCap = async (accountId, value) => {
-    setCapStates(s => ({ ...s, [accountId]: value }));
-    // Patch local accounts state so the fallback is correct if capStates resets.
-    const patch = { auto_pause_enabled: value };
-    setAccounts(prev => prev.map(a =>
-      a.id === accountId ? { ...a, settings: { ...(a.settings || {}), ...patch } } : a
-    ));
-    // Also patch App-level propAccounts so the value survives navigation / re-mount.
-    onAccountSettingChange?.(accountId, patch);
-    try { await axios.put(`/api/settings/${accountId}`, { auto_pause_enabled: value }); } catch { /* silent */ }
-  };
+  const toggleCollapse = (id) => setCollapsed(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const skipCampaign   = (id) => setSkipped(s => new Set(s).add(id));
 
-  const handleConfirmApply = async (item) => {
-    setApplyItem(null);
-    const { daysIn, daysInMonth } = getDaysInfo();
-    const pace = computePace(item.monthly, item.spend, daysIn, daysInMonth);
-
-    // Build one adjustment per campaign, preserving each campaign's current
-    // daily-budget share instead of forcing an even split.
-    // Only push to ENABLED campaigns — paused ones won't spend the budget.
-    const eligible = uniqueCampaigns(item.campaigns || []).filter(c => c.budget_resource_name && c.is_active);
+  // Push a set of {campaign, rec} adjustments to Google Ads for one account.
+  const pushAdjustments = async (account, rows) => {
+    const eligible = rows.filter(r => r.campaign.budget_resource_name && r.campaign.is_active);
     if (!eligible.length) {
-      toast.warn('No active campaigns have a budget resource name yet — run pacing first to populate them.');
+      toast.warn('No active campaigns have a budget resource name yet — run pacing first.');
       return;
     }
-    const totalCurrent = eligible.reduce((s, c) => s + currentDaily(c), 0);
-    const perCampaign = Math.round((pace.dailyRec / eligible.length) * 100) / 100;
-    const adjustments = eligible.map(c => ({
-      campaign_id:          c.id,
-      budget_resource_name: c.budget_resource_name,
-      new_daily_budget:     totalCurrent > 0
-        ? Math.round((pace.dailyRec * (currentDaily(c) / totalCurrent)) * 100) / 100
-        : perCampaign,
+    const adjustments = eligible.map(r => ({
+      campaign_id:          r.campaign.id,
+      budget_resource_name: r.campaign.budget_resource_name,
+      new_daily_budget:     Math.round(r.rec * 100) / 100,
     }));
-
     toast.info(`Pushing ${eligible.length} budget(s) to Google Ads…`);
     try {
-      const r = await axios.post(`/api/pacing/${item.accountId}/apply`, { adjustments });
-      const { applied = [], errors = [] } = r.data;
-      if (errors.length > 0 && applied.length === 0) {
-        const reason = errors[0]?.error || 'unknown error';
-        toast.error(`All ${errors.length} failed: ${reason}`);
-      } else if (errors.length > 0) {
-        const reason = errors[0]?.error || 'unknown error';
-        toast.error(`${applied.length} updated, ${errors.length} failed: ${reason}`);
-      } else {
-        toast.success(r.data.message || 'Daily budgets updated in Google Ads');
-      }
-      // Optimistically update local campaigns state so the Apply button hides
-      // immediately (before load() resolves) and currentDailyBudget reflects the
-      // new values right away.
+      const res = await axios.post(`/api/pacing/${account.id}/apply`, { adjustments });
+      const { applied = [], errors = [] } = res.data;
+      if (errors.length && !applied.length)      toast.error(`All ${errors.length} failed: ${errors[0]?.error || 'unknown error'}`);
+      else if (errors.length)                    toast.error(`${applied.length} updated, ${errors.length} failed: ${errors[0]?.error || 'unknown error'}`);
+      else                                       toast.success(res.data.message || 'Daily budgets updated in Google Ads');
+      // Optimistic local update so Apply buttons clear immediately.
       const byId = new Map(adjustments.map(a => [a.campaign_id, a.new_daily_budget]));
       setAccounts(prev => prev.map(a => {
-        if (a.id !== item.accountId) return a;
-        const updatedCampaigns = (a.campaigns || []).map(c => {
-          const newBudget = byId.get(c.id);
-          if (newBudget == null) return c;
-          return {
-            ...c,
-            current_daily_budget: newBudget,
-            latest_pacing: c.latest_pacing ? {
-              ...c.latest_pacing,
-              current_daily_budget: newBudget,
-              recommended_daily_budget: newBudget,
-              status: 'ON_PACE',
-              change_percent: 0,
-            } : c.latest_pacing,
-          };
-        });
-        return { ...a, campaigns: updatedCampaigns };
+        if (a.id !== account.id) return a;
+        return { ...a, campaigns: (a.campaigns || []).map(c => {
+          const nb = byId.get(c.id);
+          if (nb == null) return c;
+          return { ...c, current_daily_budget: nb,
+            latest_pacing: c.latest_pacing ? { ...c.latest_pacing, current_daily_budget: nb, recommended_daily_budget: nb, status: 'ON_PACE', change_percent: 0 } : c.latest_pacing };
+        }) };
       }));
-      load();
-      onAccountsChange?.();
+      load(); onAccountsChange?.();
     } catch (e) {
       toast.error(e.response?.data?.error || 'Failed to push to Google Ads');
     }
   };
 
-  // Filter + sort
-  const filteredAccounts = useMemo(() => {
-    let list = accounts.map(a => {
-      const { pace } = accountPacing(a, daysIn, daysInMonth);
-      // Use sign-aware filter status so "Over" and "Under" buttons work correctly.
-      // pace.status uses |deltaPct| so both -99% and +99% become 'over' — wrong for filtering.
-      const filterStatus = pace.deltaPct > 5 ? 'over' : pace.deltaPct < -5 ? 'under' : 'ok';
-      return { a, status: filterStatus };
-    });
-    if (filter !== 'all') list = list.filter(x => x.status === filter);
+  const handleApplyOne = (account, child) => pushAdjustments(account, [child]);
+  const handleApplyAll = (account, table) => {
+    const rows = [];
+    for (const s of table.segments)
+      for (const c of s.children)
+        if (c.needsApply && !skipped.has(c.campaign.id)) rows.push(c);
+    pushAdjustments(account, rows);
+  };
+
+  // Filter + order accounts.
+  const visibleAccounts = useMemo(() => {
+    let list = [...accounts];
     if (q.trim()) {
       const Q = q.trim().toLowerCase();
-      list = list.filter(x => x.a.account_name.toLowerCase().includes(Q));
-    }
-    if (sort === 'worst') {
-      list.sort((x, y) => {
-        const xp = accountPacing(x.a, daysIn, daysInMonth).pace;
-        const yp = accountPacing(y.a, daysIn, daysInMonth).pace;
-        return Math.abs(yp.deltaPct) - Math.abs(xp.deltaPct);
+      list = list.filter(a => {
+        if (a.account_name.toLowerCase().includes(Q)) return true;
+        const t = tables.get(a.id);
+        return t?.segments.some(s => s.name.toLowerCase().includes(Q) || s.children.some(c => c.name.toLowerCase().includes(Q)));
       });
     }
-    if (sort === 'spend') {
-      list.sort((x, y) => accountPacing(y.a, daysIn, daysInMonth).spend - accountPacing(x.a, daysIn, daysInMonth).spend);
-    }
-    if (sort === 'name') list.sort((x, y) => x.a.account_name.localeCompare(y.a.account_name));
-    return list.map(x => x.a);
-  }, [accounts, filter, sort, q, daysIn, daysInMonth]);
+    list.sort((x, y) => {
+      if (oldestFirst) {
+        const xt = x.last_pacing_run_at ? new Date(x.last_pacing_run_at + 'Z').getTime() : 0;
+        const yt = y.last_pacing_run_at ? new Date(y.last_pacing_run_at + 'Z').getTime() : 0;
+        return xt - yt;
+      }
+      // Default: most actionable first.
+      const xa = tables.get(x.id)?.segments.reduce((n, s) => n + s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length, 0) || 0;
+      const ya = tables.get(y.id)?.segments.reduce((n, s) => n + s.children.filter(c => c.needsApply && !skipped.has(c.campaign.id)).length, 0) || 0;
+      return ya - xa;
+    });
+    return list;
+  }, [accounts, tables, q, oldestFirst, skipped]);
 
   return (
-    <div>
-      {/* Top utility row */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginBottom: '14px' }}>
-        <button className="btn ghost small" onClick={() => setShowMcc(true)}>
-          <CloudDownload size={13} /> Import MCC
-        </button>
-        <button className="btn small" onClick={runAllPacing} disabled={runningAll}>
-          <Play size={13} />
-          {runningAll
-            ? syncPhase
-              ? 'Syncing campaigns…'
-              : paceProgress.total > 0
-                ? `${paceProgress.completed}/${paceProgress.total} paced…`
-                : 'Starting pacing…'
-            : 'Sync & Pace All'}
-        </button>
-        <button className="btn small" onClick={() => setShowAdd(true)}>
-          <Plus size={13} /> Add Account
-        </button>
+    <div className="allcamp">
+      {/* Page header */}
+      <div className="ac-header">
+        <div>
+          <h1 className="ac-title">All Campaigns</h1>
+          <p className="ac-sub">Every tracked campaign across all accounts. Apply pacing recommendations or skip the ones you've already addressed.</p>
+        </div>
+        <div className="ac-header-actions">
+          {runningAll && (
+            <span className="pace-chip">
+              <Activity size={13} />
+              {syncPhase ? 'Syncing campaigns…'
+                : paceProgress.total > 0 ? `Pacing ${paceProgress.completed}/${paceProgress.total}` : 'Starting…'}
+            </span>
+          )}
+          <button className="btn ghost small" onClick={() => setShowMcc(true)}><CloudDownload size={13} /> Import MCC</button>
+          <button className="btn primary small" onClick={runAllPacing} disabled={runningAll}><Play size={13} /> Sync & Pace All</button>
+          <button className="btn small" onClick={() => setShowAdd(true)}><Plus size={13} /> Add Account</button>
+        </div>
       </div>
 
-      {/* Summary strip */}
+      {/* Stat cards */}
       {!loading && accounts.length > 0 && (
-        <SummaryBar accounts={accounts} daysIn={daysIn} daysInMonth={daysInMonth} dayOfMonth={dayOfMonth} />
+        <StatCards accounts={accounts} tables={tables} daysIn={daysIn} daysInMonth={daysInMonth} dayOfMonth={dayOfMonth} attention={totalAttention} />
       )}
 
-      {/* Filter bar */}
-      {!loading && accounts.length > 0 && (
-        <div className="filterbar">
-          <div className="search-box">
-            <Search size={13} style={{ color: 'var(--muted)', flexShrink: 0 }} />
-            <input placeholder="Search accounts…" value={q} onChange={e => setQ(e.target.value)} />
-          </div>
-          <div className="segctrl">
-            <button className={filter === 'all'   ? 'active' : ''} onClick={() => setFilter('all')}>All</button>
-            <button className={filter === 'over'  ? 'active' : ''} onClick={() => setFilter('over')}>Over</button>
-            <button className={filter === 'under' ? 'active' : ''} onClick={() => setFilter('under')}>Under</button>
-            <button className={filter === 'ok'    ? 'active' : ''} onClick={() => setFilter('ok')}>On pace</button>
-          </div>
-          <div style={{ flex: 1 }} />
-          <span className="label-sm">Sort</span>
-          <div className="segctrl">
-            <button className={sort === 'worst' ? 'active' : ''} onClick={() => setSort('worst')}>Worst pace</button>
-            <button className={sort === 'spend' ? 'active' : ''} onClick={() => setSort('spend')}>By spend</button>
-            <button className={sort === 'name'  ? 'active' : ''} onClick={() => setSort('name')}>A–Z</button>
-          </div>
+      {/* Recommendation banner */}
+      {!loading && totalAttention > 0 && (
+        <div className="rec-banner">
+          <AlertTriangle size={16} className="rec-banner-icon" />
+          <span className="rec-banner-text">
+            <strong>{totalAttention}</strong> recommendation{totalAttention === 1 ? '' : 's'} across <strong>{accountsWithAttention}</strong> account{accountsWithAttention === 1 ? '' : 's'}. Newly-detected pace deviations from the latest run.
+          </span>
+          <button className={`rec-banner-btn ${oldestFirst ? 'active' : ''}`} onClick={() => setOldestFirst(v => !v)}>
+            {oldestFirst ? 'Most actionable first' : 'Review oldest first'}
+          </button>
         </div>
       )}
 
-      {/* Cards */}
+      {/* Search */}
+      {!loading && accounts.length > 0 && (
+        <div className="ac-search">
+          <Search size={15} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+          <input placeholder="Search accounts, campaigns, or segments…" value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+      )}
+
+      {/* Account groups */}
       {loading ? (
-        <div className="cards-grid">
-          {[1,2,3,4,5,6,7,8].map(i => (
-            <div key={i} style={{ height: '228px', borderRadius: 'var(--r)', overflow: 'hidden' }}>
-              <div className="bb-skeleton" style={{ height: '100%' }} />
-            </div>
-          ))}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {[1, 2, 3].map(i => <div key={i} className="bb-skeleton" style={{ height: 180, borderRadius: 'var(--r-lg)' }} />)}
         </div>
       ) : accounts.length === 0 ? (
         <div className="bb-empty">
@@ -842,46 +785,36 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
           </div>
         </div>
       ) : (
-        <>
-          <div className="cards-grid">
-            {filteredAccounts.map(account => (
-              <AccountCard
-                key={account.id}
-                account={account}
-                daysIn={daysIn}
-                daysInMonth={daysInMonth}
-                capStates={capStates}
-                setCap={setCap}
-                onApply={setApplyItem}
-                navigate={navigate}
-              />
-            ))}
-          </div>
-          {filteredAccounts.length === 0 && (
-            <div style={{ padding: '48px', textAlign: 'center', color: 'var(--muted)' }}>
-              No accounts match your filter
-            </div>
+        <div className="acct-groups">
+          {visibleAccounts.map((account, i) => (
+            <AccountGroup
+              key={account.id}
+              account={account}
+              table={tables.get(account.id)}
+              index={i}
+              collapsed={collapsed.has(account.id)}
+              onToggle={toggleCollapse}
+              skipped={skipped}
+              onSkip={skipCampaign}
+              onApplyOne={handleApplyOne}
+              onApplyAll={handleApplyAll}
+              navigate={navigate}
+            />
+          ))}
+          {visibleAccounts.length === 0 && (
+            <div style={{ padding: '48px', textAlign: 'center', color: 'var(--muted)' }}>No accounts match your search</div>
           )}
-        </>
+        </div>
       )}
 
       {showAdd && (
-        <AddAccountModal
-          onClose={() => setShowAdd(false)}
-          onAdded={() => { setShowAdd(false); load(); onAccountsChange?.(); toast.success('Account added'); }}
-        />
+        <AddAccountModal onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); load(); onAccountsChange?.(); toast.success('Account added'); }} />
       )}
-
       {showMcc && (
-        <ImportMccModal
-          onClose={() => setShowMcc(false)}
-          existingIds={new Set(accounts.map(a => a.google_customer_id))}
-          onImported={(count) => { setShowMcc(false); load(); onAccountsChange?.(); toast.success(`Imported ${count} account(s)`); }}
-        />
+        <ImportMccModal onClose={() => setShowMcc(false)} existingIds={new Set(accounts.map(a => a.google_customer_id))} onImported={(count) => { setShowMcc(false); load(); onAccountsChange?.(); toast.success(`Imported ${count} account(s)`); }} />
       )}
-
       {applyItem && (
-        <ApplyModal item={applyItem} onClose={() => setApplyItem(null)} onConfirm={handleConfirmApply} />
+        <ApplyModal item={applyItem} onClose={() => setApplyItem(null)} onConfirm={() => setApplyItem(null)} />
       )}
     </div>
   );

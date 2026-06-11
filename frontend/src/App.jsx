@@ -91,7 +91,7 @@ function Topbar({ accounts }) {
         ) : isSettings ? (
           <span className="page-title">Settings</span>
         ) : (
-          <span className="page-title">Dashboard</span>
+          <span className="page-title">All Campaigns</span>
         )}
       </div>
       <div className="topbar-right">

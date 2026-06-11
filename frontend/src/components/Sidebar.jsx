@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Bell, Settings, LogOut } from 'lucide-react';
+import { Home as HomeIcon, Bell, Settings, LogOut, Search } from 'lucide-react';
 import { useAuth } from '../App';
 import { useToast } from './Toast';
 import Logo from './Logo';
@@ -16,6 +17,7 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { addToast } = useToast();
+  const [filter, setFilter] = useState('');
 
   const handleLogout = async () => {
     try {
@@ -27,7 +29,10 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
   };
 
   const initials = user?.email ? user.email.slice(0, 2).toUpperCase() : 'CA';
-  const recentAccounts = accounts.slice(0, 5);
+  const q = filter.trim().toLowerCase();
+  const shownAccounts = q
+    ? accounts.filter(a => (a.account_name || '').toLowerCase().includes(q))
+    : accounts;
 
   return (
     <aside className="sidebar">
@@ -36,12 +41,40 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
         <Logo size={144} />
       </div>
 
-      {/* Workspace nav */}
-      <div className="nav-section-label">Workspace</div>
+      {/* Accounts */}
+      <div className="nav-section-label">Accounts</div>
+      <div className="sidebar-filter">
+        <Search size={13} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+        <input
+          placeholder="Filter accounts…"
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+        />
+      </div>
+      <div className="sidebar-accounts">
+        {shownAccounts.map(a => (
+          <div
+            key={a.id}
+            className="recent-account-item"
+            onClick={() => navigate(`/accounts/${a.id}`)}
+          >
+            <span className={`status-dot ${accountPaceStatus(a)}`} />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {a.account_name}
+            </span>
+          </div>
+        ))}
+        {accounts.length > 0 && shownAccounts.length === 0 && (
+          <div className="sidebar-empty">No matches</div>
+        )}
+      </div>
+
+      {/* Navigation */}
+      <div className="nav-section-label" style={{ marginTop: '12px' }}>Navigation</div>
 
       <NavLink to="/" end className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
-        <LayoutDashboard size={15} />
-        Dashboard
+        <HomeIcon size={15} />
+        Home
       </NavLink>
 
       <NavLink to="/notifications" className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
@@ -54,25 +87,6 @@ export default function Sidebar({ accounts = [], unreadCount = 0 }) {
         <Settings size={15} />
         Settings
       </NavLink>
-
-      {/* Recent accounts */}
-      {recentAccounts.length > 0 && (
-        <>
-          <div className="nav-section-label" style={{ marginTop: '10px' }}>Recent Accounts</div>
-          {recentAccounts.map(a => (
-            <div
-              key={a.id}
-              className="recent-account-item"
-              onClick={() => navigate(`/accounts/${a.id}`)}
-            >
-              <span className={`status-dot ${accountPaceStatus(a)}`} />
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.account_name}
-              </span>
-            </div>
-          ))}
-        </>
-      )}
 
       {/* User block */}
       <div className="sidebar-user">
