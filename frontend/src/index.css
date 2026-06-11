@@ -1616,34 +1616,34 @@ html, body {
 .acct-group-head {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 9px 14px;
   cursor: pointer;
   transition: background 0.12s;
 }
 .acct-group-head:hover { background: var(--surface-2); }
 .acct-bar {
-  width: 4px;
+  width: 3px;
   align-self: stretch;
-  min-height: 34px;
+  min-height: 24px;
   border-radius: 3px;
   flex-shrink: 0;
 }
 .acct-head-id { flex: 1; min-width: 0; }
 .acct-name {
   font-family: 'Inter Tight', sans-serif;
-  font-size: var(--t-xl);
+  font-size: var(--t-md);
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ink);
 }
-.acct-meta { font-size: var(--t-sm); color: var(--muted); margin-top: 2px; }
+.acct-meta { font-size: var(--t-xs); color: var(--muted); margin-top: 1px; }
 .acct-meta strong { color: var(--ink-3); font-weight: 600; }
 
-.acct-head-right { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.acct-head-right { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
 .acct-metric { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
-.acct-metric-k { font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; }
-.acct-metric-v { font-size: var(--t-md); font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.acct-metric-k { font-size: 9px; font-weight: 600; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; }
+.acct-metric-v { font-size: var(--t-sm); font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
 .acct-metric-v.danger { color: var(--red); }
 
 .btn-applyall {
