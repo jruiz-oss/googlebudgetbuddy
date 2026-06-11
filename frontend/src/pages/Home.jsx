@@ -302,7 +302,7 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
               <th className="num">PACE</th>
               <th className="num">CURRENT DAILY</th>
               <th className="num">REC. DAILY</th>
-              <th>STATUS</th>
+              <th className="status-col">STATUS</th>
               <th className="col-action">ACTION</th>
             </tr>
           </thead>
