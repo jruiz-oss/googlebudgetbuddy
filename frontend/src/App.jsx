@@ -25,26 +25,21 @@ const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
 function AuthProvider({ children }) {
-  const [user, setUser]                       = useState(undefined);
-  const [googleConnected, setGoogleConnected] = useState(false);
+  const [user, setUser] = useState(undefined);
 
   useEffect(() => {
     axios.get('/api/auth/me')
-      .then(r => { setUser(r.data.user); setGoogleConnected(r.data.user.has_google_token); })
+      .then(r => setUser(r.data.user))
       .catch(() => setUser(null));
   }, []);
 
-  useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    if (p.get('oauth_success')) { setGoogleConnected(true); window.history.replaceState({}, '', '/'); }
-    if (p.get('oauth_error'))   { window.history.replaceState({}, '', '/'); }
-  }, []);
+  const login  = (u) => setUser(u);
+  const logout = async () => { await axios.post('/api/auth/logout'); setUser(null); };
 
-  const login  = (u) => { setUser(u); setGoogleConnected(u.has_google_token); };
-  const logout = async () => { await axios.post('/api/auth/logout'); setUser(null); setGoogleConnected(false); };
-
+  // Service account auth — always connected; expose googleConnected=true for
+  // any components that still reference it.
   return (
-    <AuthContext.Provider value={{ user, googleConnected, setGoogleConnected, login, logout }}>
+    <AuthContext.Provider value={{ user, googleConnected: true, setGoogleConnected: () => {}, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

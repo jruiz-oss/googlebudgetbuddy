@@ -30,7 +30,7 @@ from sqlalchemy.orm import selectinload
 
 from database import (
     Account, AccountSettings, BudgetAdjustment, Campaign,
-    GoogleOAuthToken, JobState, PacingData, PacingRun, PauseEvent, db,
+    JobState, PacingData, PacingRun, PauseEvent, db,
     campaign_identity_key, canonical_campaigns, dedupe_by_name,
     visible_latest_campaigns,
 )
@@ -427,7 +427,7 @@ def _campaigns_for_pacing(account, today, metrics_by_id):
 # result of having two near-duplicate implementations drift apart.
 # ---------------------------------------------------------------------------
 
-def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
+def _execute_pacing_run(account, today, log_prefix='pacing'):
     """Fetch MTD spend, filter zombies, compute segment maps, write PacingData.
 
     The caller handles sheet sync (before) and sheet writeback (after), plus
@@ -482,7 +482,6 @@ def _execute_pacing_run(account, refresh_token_str, today, log_prefix='pacing'):
     )
     try:
         metrics_by_id = get_campaign_mtd_spend(
-            refresh_token_str,
             account.google_customer_id,
             all_campaign_ids,
             month_start,
@@ -701,11 +700,6 @@ def run_pacing(account_id):
         .get_or_404(account_id)
     )
 
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
-
     settings = account.settings
     if not settings:
         settings = AccountSettings(account_id=account.id)
@@ -768,7 +762,7 @@ def run_pacing(account_id):
         )
 
     # 2. Core pacing run — same code path as scheduler / run-all / mcc_sync.
-    result = _execute_pacing_run(account, token.refresh_token, today, log_prefix='Run pacing')
+    result = _execute_pacing_run(account, today, log_prefix='Run pacing')
 
     if not result['ok']:
         return jsonify({
@@ -886,11 +880,6 @@ def apply_recommendations(account_id):
     """
     logger.info('apply_recommendations — account_id=%s', account_id)
     account = Account.query.get_or_404(account_id)
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        logger.warning('apply_recommendations — no valid OAuth token for user_id=%s', user_id)
-        return jsonify({'error': 'Google account not connected'}), 401
 
     data = request.get_json() or {}
     adjustments = data.get('adjustments') or []
@@ -932,7 +921,6 @@ def apply_recommendations(account_id):
         )
         try:
             update_campaign_budget(
-                token.refresh_token,
                 account.google_customer_id,
                 budget_resource,
                 new_daily,
@@ -1027,7 +1015,7 @@ def pacing_summary(account_id):
 # /run-all background worker + route
 # ---------------------------------------------------------------------------
 
-def _run_pacing_all_job(app, refresh_token_str):
+def _run_pacing_all_job(app):
     """Run pacing for every account — executes in a background thread.
 
     Mirrors the scheduler's logic: sheet sync → MTD spend fetch → PacingData
@@ -1089,7 +1077,7 @@ def _run_pacing_all_job(app, refresh_token_str):
                         ).get(account_id)
                         settings = account.settings
 
-                    run_pacing_for_account(account, refresh_token_str, triggered_by='run_all')
+                    run_pacing_for_account(account, triggered_by='run_all')
 
                 except Exception as e:
                     logger.error('run-all background: pacing failed for account %s: %s', account_id, e)
@@ -1129,22 +1117,16 @@ def run_all_pacing():
     """
     from flask import current_app
 
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
-
     # Claim the job atomically in Postgres so concurrent workers / double-clicks
     # can't both start it. A stale run (crashed worker) is reclaimable.
     if not _claim_run_all_job():
         return jsonify({'message': 'Pacing already in progress — refresh in about a minute.'}), 409
 
     app = current_app._get_current_object()
-    refresh_token_str = token.refresh_token  # extract before thread spawns
 
     t = threading.Thread(
         target=_run_pacing_all_job,
-        args=(app, refresh_token_str),
+        args=(app,),
         daemon=True,
     )
     t.start()
@@ -1182,17 +1164,12 @@ def run_all_status():
 def manual_pause(account_id):
     """Pause all active campaigns for an account."""
     account = Account.query.get_or_404(account_id)
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'error': 'Google account not connected'}), 401
 
     active = [c for c in account.campaigns if c.is_active]
     campaign_ids = [c.google_campaign_id for c in active]
 
     try:
         pause_campaigns(
-            token.refresh_token,
             account.google_customer_id,
             campaign_ids,
             mcc_customer_id=account.mcc_customer_id,
@@ -1224,7 +1201,7 @@ def manual_pause(account_id):
 # Internal pacing runner — used by scheduler and MCC sync (no request context)
 # ---------------------------------------------------------------------------
 
-def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
+def run_pacing_for_account(account, triggered_by='mcc_sync'):
     """Fetch MTD spend and write PacingData for one account (no HTTP context).
 
     Used by:
@@ -1240,7 +1217,7 @@ def run_pacing_for_account(account, refresh_token_str, triggered_by='mcc_sync'):
     settings = account.settings
 
     result = _execute_pacing_run(
-        account, refresh_token_str, today, log_prefix='run_pacing_for_account',
+        account, today, log_prefix='run_pacing_for_account',
     )
 
     if not result['ok']:

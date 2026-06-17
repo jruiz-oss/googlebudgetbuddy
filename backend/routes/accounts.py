@@ -11,10 +11,10 @@ import threading
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
 
-from database import Account, AccountSettings, Campaign, GoogleOAuthToken, db, canonical_campaigns
+from database import Account, AccountSettings, Campaign, db, canonical_campaigns
 from google_ads_client import (
     GoogleAdsError, list_mcc_child_accounts, list_campaigns,
-    _fetch_customer_name, _fmt_customer_id, get_access_token,
+    _fetch_customer_name, _fmt_customer_id, get_service_account_access_token,
 )
 from routes.auth import login_required
 
@@ -47,10 +47,6 @@ def _is_campaign_live(lc):
 _mcc_sync_lock = threading.Lock()
 
 
-def _get_token_or_401(user_id):
-    """Return the user's GoogleOAuthToken or raise a 401-able error."""
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    return token
 
 
 def _ensure_settings(account):
@@ -213,14 +209,13 @@ def account_summary(account_id):
 # Global MCC sync — reconcile DB against live MCC
 # ---------------------------------------------------------------------------
 
-def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
+def _sync_all_campaigns_for_account(account, mcc_customer_id=None):
     """Upsert all live campaigns from Google Ads for a single account.
 
     Returns (added, updated) counts. Skips silently if the API call fails.
     """
     try:
         live = list_campaigns(
-            token.refresh_token,
             account.google_customer_id,
             mcc_customer_id=mcc_customer_id or account.mcc_customer_id,
         )
@@ -250,7 +245,7 @@ def _sync_all_campaigns_for_account(account, token, mcc_customer_id=None):
     return added, updated
 
 
-def _run_mcc_sync_job(app, refresh_token_str, mcc_id, skip_pacing=False):
+def _run_mcc_sync_job(app, mcc_id, skip_pacing=False):
     """Full MCC sync — runs in a background thread with its own Flask app context.
 
     Releases _mcc_sync_lock when done so a subsequent sync can proceed.
@@ -264,7 +259,7 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id, skip_pacing=False):
         with app.app_context():
             try:
                 live_accounts = list_mcc_child_accounts(
-                    refresh_token_str, mcc_id or None, resolve_names=True
+                    mcc_id or None, resolve_names=True
                 )
             except GoogleAdsError as e:
                 logger.error('MCC sync background job failed (account list): %s', e)
@@ -314,7 +309,6 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id, skip_pacing=False):
                 def _fetch_campaigns(acct_id, customer_id, acct_mcc_id):
                     try:
                         live = list_campaigns(
-                            refresh_token_str,
                             customer_id,
                             mcc_customer_id=mcc_id or acct_mcc_id,
                         )
@@ -412,7 +406,7 @@ def _run_mcc_sync_job(app, refresh_token_str, mcc_id, skip_pacing=False):
                                 .get(acct.id)
                             )
                             if acct_full:
-                                run_pacing_for_account(acct_full, refresh_token_str, triggered_by='mcc_sync')
+                                run_pacing_for_account(acct_full, triggered_by='mcc_sync')
                                 pacing_run_count += 1
                         except Exception as e:
                             logger.warning('Pacing run failed for account %s during MCC sync: %s', acct.id, e)
@@ -445,11 +439,6 @@ def sync_from_mcc():
     import os
     from flask import current_app
 
-    user_id = session['user_id']
-    token = _get_token_or_401(user_id)
-    if not token:
-        return jsonify({'error': 'Google account not connected. Connect via Settings → Google Account.'}), 401
-
     data = request.get_json() or {}
     mcc_id = (data.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')).replace('-', '')
     # skip_pacing=True means the caller will trigger run-all separately for pacing.
@@ -462,11 +451,10 @@ def sync_from_mcc():
         return jsonify({'message': 'Sync already in progress — refresh in about a minute.'}), 409
 
     app = current_app._get_current_object()
-    refresh_token_str = token.refresh_token  # extract before thread spawns
 
     t = threading.Thread(
         target=_run_mcc_sync_job,
-        args=(app, refresh_token_str, mcc_id),
+        args=(app, mcc_id),
         kwargs={'skip_pacing': skip_pacing},
         daemon=True,
     )
@@ -505,18 +493,13 @@ def refresh_account_names():
     detected. Silently skips accounts if no OAuth token is available.
     """
     import os
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'refreshed': 0, 'message': 'No Google account connected — skipped'}), 200
-
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
     mcc_id = os.environ.get('GOOGLE_ADS_MCC_ID', '').replace('-', '')
 
     try:
-        access_token = get_access_token(token.refresh_token)
+        access_token = get_service_account_access_token()
     except Exception as e:
-        return jsonify({'refreshed': 0, 'message': f'Token refresh failed: {e}'}), 200
+        return jsonify({'refreshed': 0, 'message': f'Service account token error: {e}'}), 200
 
     accounts = Account.query.all()
     refreshed = []
@@ -556,13 +539,8 @@ def list_mcc_accounts():
     import os
     mcc_id = request.args.get('mcc_id') or os.environ.get('GOOGLE_ADS_MCC_ID', '')
 
-    user_id = session['user_id']
-    token = _get_token_or_401(user_id)
-    if not token:
-        return jsonify({'error': 'Google account not connected. Please connect via Settings.'}), 401
-
     try:
-        accounts = list_mcc_child_accounts(token.refresh_token, mcc_id or None)
+        accounts = list_mcc_child_accounts(mcc_id or None)
         return jsonify({'accounts': accounts})
     except GoogleAdsError as e:
         logger.error('MCC list failed: %s', e)
@@ -578,14 +556,9 @@ def list_mcc_accounts():
 def preview_campaigns(account_id):
     """Preview live campaigns from Google Ads (dry run — nothing saved)."""
     account = Account.query.get_or_404(account_id)
-    user_id = session['user_id']
-    token = _get_token_or_401(user_id)
-    if not token:
-        return jsonify({'error': 'Google account not connected'}), 401
 
     try:
         campaigns = list_campaigns(
-            token.refresh_token,
             account.google_customer_id,
             mcc_customer_id=account.mcc_customer_id,
         )
@@ -604,10 +577,6 @@ def import_campaigns(account_id):
     Campaigns not in the list are left alone (not deleted).
     """
     account = Account.query.get_or_404(account_id)
-    user_id = session['user_id']
-    token = _get_token_or_401(user_id)
-    if not token:
-        return jsonify({'error': 'Google account not connected'}), 401
 
     data = request.get_json() or {}
     selected_ids = [str(cid) for cid in (data.get('campaign_ids') or [])]
@@ -618,7 +587,6 @@ def import_campaigns(account_id):
     # Fetch live campaigns to get names and budget resource names
     try:
         live = list_campaigns(
-            token.refresh_token,
             account.google_customer_id,
             mcc_customer_id=account.mcc_customer_id,
         )

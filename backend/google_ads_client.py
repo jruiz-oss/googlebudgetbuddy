@@ -2,10 +2,17 @@
 Google Ads API client.
 
 Handles all communication with the Google Ads API v23.
-Uses OAuth 2.0 refresh tokens (stored in google_oauth_tokens table).
+Uses a service account for authentication — no OAuth consent screen, no stored
+refresh tokens. The service account is added as a user directly in Google Ads
+(Standard or Admin access) and authenticates via a signed JWT exchanged for a
+short-lived access token.
+
+Required env var:
+  GOOGLE_CREDENTIALS_JSON  — the full service account JSON key (same one used
+                             for Google Sheets via gspread).
 
 Key responsibilities:
-  - Refreshing short-lived access tokens from the stored refresh token
+  - Obtaining short-lived access tokens from the service account key
   - Pulling MTD spend per campaign using GAQL (Google Ads Query Language)
   - Listing campaigns under an account
   - Updating campaign budgets
@@ -13,6 +20,7 @@ Key responsibilities:
   - Listing child accounts under an MCC
 """
 
+import json
 import logging
 import os
 from datetime import datetime, timedelta, date
@@ -23,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_ADS_API_VERSION = 'v23'
 GOOGLE_ADS_API_BASE = f'https://googleads.googleapis.com/{GOOGLE_ADS_API_VERSION}'
-TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
 
 class GoogleAdsError(Exception):
@@ -31,38 +38,40 @@ class GoogleAdsError(Exception):
     pass
 
 
+# Keep for backward compatibility — no longer raised but callers may catch it.
 class InvalidTokenError(GoogleAdsError):
-    """Raised when the refresh token is invalid or revoked."""
     pass
 
 
-def get_access_token(refresh_token: str) -> str:
-    """Exchange a refresh token for a short-lived access token.
+def get_service_account_access_token() -> str:
+    """Obtain a short-lived access token using the service account key.
 
-    Called before every API request. In production you'd cache the access token
-    until it expires, but for simplicity we refresh on every call — Google's
-    token endpoint handles this gracefully.
+    Reads GOOGLE_CREDENTIALS_JSON (the same service account used for Sheets).
+    The service account must be added as a user in Google Ads with Standard or
+    Admin access so it can query the adwords scope.
+
+    google-auth handles JWT signing and token exchange internally.
     """
-    client_id = os.environ.get('GOOGLE_ADS_CLIENT_ID')
-    client_secret = os.environ.get('GOOGLE_ADS_CLIENT_SECRET')
+    from google.oauth2 import service_account
+    from google.auth.transport.requests import Request as GoogleAuthRequest
 
-    if not client_id or not client_secret:
-        raise GoogleAdsError('GOOGLE_ADS_CLIENT_ID and GOOGLE_ADS_CLIENT_SECRET must be set.')
+    creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON', '')
+    if not creds_json:
+        raise GoogleAdsError(
+            'GOOGLE_CREDENTIALS_JSON must be set for service account authentication.'
+        )
 
-    resp = requests.post(TOKEN_URL, data={
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'refresh_token': refresh_token,
-        'grant_type': 'refresh_token',
-    }, timeout=15)
+    try:
+        creds_info = json.loads(creds_json)
+    except json.JSONDecodeError as e:
+        raise GoogleAdsError(f'GOOGLE_CREDENTIALS_JSON is not valid JSON: {e}')
 
-    if not resp.ok:
-        body = resp.text
-        if 'invalid_grant' in body:
-            raise InvalidTokenError(f'Refresh token is invalid or revoked: {body}')
-        raise GoogleAdsError(f'Token refresh failed ({resp.status_code}): {body}')
-
-    return resp.json()['access_token']
+    credentials = service_account.Credentials.from_service_account_info(
+        creds_info,
+        scopes=['https://www.googleapis.com/auth/adwords'],
+    )
+    credentials.refresh(GoogleAuthRequest())
+    return credentials.token
 
 
 def _headers(access_token: str, customer_id: str, developer_token: str, mcc_customer_id: str = None) -> dict:
@@ -132,7 +141,7 @@ def _fmt_customer_id(raw_id: str) -> str:
     return raw_id
 
 
-def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
+def list_mcc_child_accounts(mcc_customer_id: str = None,
                              resolve_names: bool = True) -> list:
     """Return all active non-manager accounts under the MCC.
 
@@ -151,7 +160,7 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
     if not mcc_id:
         raise GoogleAdsError('MCC customer ID is required. Set GOOGLE_ADS_MCC_ID in Railway env vars.')
 
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     query = """
         SELECT
@@ -193,7 +202,7 @@ def list_mcc_child_accounts(refresh_token: str, mcc_customer_id: str = None,
         if nameless:
             def _resolve(acct):
                 fetched = _fetch_customer_name(
-                    access_token, acct['customer_id'], developer_token, mcc_id
+                    access_token, acct['customer_id'], developer_token, mcc_id,
                 )
                 return acct['customer_id'], fetched if fetched else _fmt_customer_id(acct['customer_id'])
 
@@ -243,7 +252,7 @@ def _date_part(dt_str: str):
     return s.replace('T', ' ').split(' ')[0] or None
 
 
-def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = None) -> list:
+def list_campaigns(customer_id: str, mcc_customer_id: str = None) -> list:
     """Return all ENABLED/PAUSED campaigns for the given customer.
 
     Excludes phantom-budget channel types (LOCAL_SERVICES, SMART, HOTEL, LOCAL)
@@ -253,7 +262,7 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
                budget_resource_name, daily_budget_micros, daily_budget_usd}, ...]
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     query = """
         SELECT
@@ -298,7 +307,7 @@ def list_campaigns(refresh_token: str, customer_id: str, mcc_customer_id: str = 
     return campaigns
 
 
-def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
+def get_campaign_mtd_spend(customer_id: str,
                             campaign_ids: list, month_start: date,
                             mcc_customer_id: str = None) -> dict:
     """Return MTD spend, clicks, and conversions per campaign ID for the current month.
@@ -315,7 +324,7 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
         return {}
 
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     # Yesterday is the last full day of data available.
     # On the 1st of the month, yesterday is still in the prior month — the
@@ -424,7 +433,7 @@ def get_campaign_mtd_spend(refresh_token: str, customer_id: str,
     return result
 
 
-def get_campaign_daily_spend(refresh_token: str, customer_id: str,
+def get_campaign_daily_spend(customer_id: str,
                               campaign_ids: list, month_start: date,
                               mcc_customer_id: str = None) -> dict:
     """Return daily spend per campaign for the chart (spend-vs-target line).
@@ -435,7 +444,7 @@ def get_campaign_daily_spend(refresh_token: str, customer_id: str,
         return {}
 
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     yesterday = (datetime.utcnow().date() - timedelta(days=1)).isoformat()
     start = month_start.isoformat()
@@ -470,7 +479,7 @@ def get_campaign_daily_spend(refresh_token: str, customer_id: str,
 # Budget updates
 # ---------------------------------------------------------------------------
 
-def update_campaign_budget(refresh_token: str, customer_id: str,
+def update_campaign_budget(customer_id: str,
                             budget_resource_name: str, new_daily_usd: float,
                             mcc_customer_id: str = None) -> bool:
     """Update a campaign's daily budget.
@@ -480,7 +489,7 @@ def update_campaign_budget(refresh_token: str, customer_id: str,
     Returns True on success.
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
     cid = customer_id.replace('-', '')
 
     # Google Ads enforces a minimum of $0.01/day (10,000 micros for USD).
@@ -509,11 +518,11 @@ def update_campaign_budget(refresh_token: str, customer_id: str,
     return True
 
 
-def pause_campaigns(refresh_token: str, customer_id: str,
+def pause_campaigns(customer_id: str,
                     campaign_ids: list, mcc_customer_id: str = None) -> list:
     """Pause a list of campaigns. Returns list of successfully paused campaign IDs."""
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
     cid = customer_id.replace('-', '')
 
     url = f'{GOOGLE_ADS_API_BASE}/customers/{cid}/campaigns:mutate'
@@ -534,11 +543,11 @@ def pause_campaigns(refresh_token: str, customer_id: str,
     return campaign_ids
 
 
-def enable_campaigns(refresh_token: str, customer_id: str,
+def enable_campaigns(customer_id: str,
                      campaign_ids: list, mcc_customer_id: str = None) -> list:
     """Re-enable a list of campaigns. Returns list of successfully enabled campaign IDs."""
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
     cid = customer_id.replace('-', '')
 
     url = f'{GOOGLE_ADS_API_BASE}/customers/{cid}/campaigns:mutate'
@@ -563,7 +572,7 @@ def enable_campaigns(refresh_token: str, customer_id: str,
 # Leads
 # ---------------------------------------------------------------------------
 
-def get_lead_form_submissions(refresh_token: str, customer_id: str,
+def get_lead_form_submissions(customer_id: str,
                                start_date: date, end_date: date,
                                mcc_customer_id: str = None) -> list:
     """Pull lead form submission data for a date range.
@@ -572,7 +581,7 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
     Note: Lead form data is available via the lead_form_submission_data resource.
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     start = start_date.isoformat()
     end = end_date.isoformat()
@@ -621,7 +630,7 @@ def get_lead_form_submissions(refresh_token: str, customer_id: str,
     return leads
 
 
-def diagnose_lead_form_setup(refresh_token: str, customer_id: str,
+def diagnose_lead_form_setup(customer_id: str,
                              mcc_customer_id: str = None) -> dict:
     """Figure out WHY a lead pull returned 0 rows.
 
@@ -640,7 +649,7 @@ def diagnose_lead_form_setup(refresh_token: str, customer_id: str,
       }
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     result = {
         'lead_form_asset_count': 0,
@@ -689,7 +698,7 @@ def diagnose_lead_form_setup(refresh_token: str, customer_id: str,
 # Search terms (for monthly AI summaries)
 # ---------------------------------------------------------------------------
 
-def get_campaign_spend_for_period(refresh_token: str, customer_id: str,
+def get_campaign_spend_for_period(customer_id: str,
                                    campaign_ids: list,
                                    start_date: date, end_date: date,
                                    mcc_customer_id: str = None) -> dict:
@@ -704,7 +713,7 @@ def get_campaign_spend_for_period(refresh_token: str, customer_id: str,
         return {}
 
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     id_list = ', '.join(str(cid) for cid in campaign_ids)
     start = start_date.isoformat()
@@ -741,7 +750,7 @@ def get_campaign_spend_for_period(refresh_token: str, customer_id: str,
     return result
 
 
-def get_top_search_terms(refresh_token: str, customer_id: str,
+def get_top_search_terms(customer_id: str,
                           month_start: date, month_end: date,
                           mcc_customer_id: str = None,
                           limit: int = 30) -> list:
@@ -751,7 +760,7 @@ def get_top_search_terms(refresh_token: str, customer_id: str,
     Returns a list of dicts: [{query, clicks, impressions, conversions, ctr}, ...]
     """
     developer_token = os.environ.get('GOOGLE_ADS_DEVELOPER_TOKEN', '')
-    access_token = get_access_token(refresh_token)
+    access_token = get_service_account_access_token()
 
     start = month_start.isoformat()
     end = month_end.isoformat()

@@ -226,7 +226,7 @@ def _scheduled_pacing_job(app):
     from sqlalchemy.orm import selectinload
 
     with app.app_context():
-        from database import Account, Campaign, GoogleOAuthToken
+        from database import Account, Campaign
         from routes.sheets import sync_sheet_budgets_for_account
         from routes.pacing import run_pacing_for_account
 
@@ -250,14 +250,6 @@ def _scheduled_pacing_job(app):
                 if not settings:
                     continue
 
-                # Find a valid OAuth token (use the account owner's token)
-                token = GoogleOAuthToken.query.filter_by(
-                    user_id=account.user_id, is_valid=True
-                ).first()
-                if not token:
-                    logger.warning('No valid token for account %s — skipping', account.id)
-                    continue
-
                 # Sheet sync first so budgets are current. Reload account
                 # afterwards regardless of success/failure so pacing always
                 # sees fresh objects + post-sync monthly_budget.
@@ -276,7 +268,7 @@ def _scheduled_pacing_job(app):
                     )
 
                 # Run pacing through the shared core.
-                run_pacing_for_account(account, token.refresh_token, triggered_by='scheduler')
+                run_pacing_for_account(account, triggered_by='scheduler')
 
             except Exception as e:
                 logger.error('Scheduled pacing failed for account %s: %s', account_id, e)
@@ -310,7 +302,7 @@ def _hourly_auto_pause_job(app):
     from sqlalchemy.orm import selectinload
 
     with app.app_context():
-        from database import Account, Campaign, GoogleOAuthToken, PauseEvent
+        from database import Account, Campaign, PauseEvent
         from routes.pacing import _execute_pacing_run, _effective_mcc_customer_id
         from google_ads_client import pause_campaigns, GoogleAdsError
 
@@ -339,14 +331,8 @@ def _hourly_auto_pause_job(app):
                 if 'grant' in (account.account_name or '').lower():
                     continue
 
-                token = GoogleOAuthToken.query.filter_by(
-                    user_id=account.user_id, is_valid=True
-                ).first()
-                if not token:
-                    continue
-
                 result = _execute_pacing_run(
-                    account, token.refresh_token, today,
+                    account, today,
                     log_prefix='hourly_auto_pause',
                 )
                 # _execute_pacing_run may delete/replace today's PacingData rows;
@@ -396,7 +382,6 @@ def _hourly_auto_pause_job(app):
 
                 try:
                     pause_campaigns(
-                        token.refresh_token,
                         account.google_customer_id,
                         campaign_ids,
                         mcc_customer_id=_effective_mcc_customer_id(account),

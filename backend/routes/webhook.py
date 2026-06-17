@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request
 
 from database import (
-    Account, AccountSettings, Campaign, GoogleOAuthToken,
+    Account, AccountSettings, Campaign,
     PacingData, PacingRun, PauseEvent, db,
 )
 

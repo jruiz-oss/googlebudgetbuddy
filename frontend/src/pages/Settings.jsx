@@ -1,14 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Link2, Link2Off, Save } from 'lucide-react';
+import { ShieldCheck, Save } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
-import { useAuth } from '../App';
 
 export default function Settings() {
   const { id } = useParams();
   const { addToast } = useToast();
-  const { googleConnected, setGoogleConnected } = useAuth();
 
   const [account, setAccount] = useState(null);
   const [settings, setSettings] = useState(null);
@@ -18,7 +16,6 @@ export default function Settings() {
   const [digestEnabled, setDigestEnabled] = useState(false);
   const [trackLeads, setTrackLeads] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [connectingGoogle, setConnectingGoogle] = useState(false);
   const [previewRows, setPreviewRows] = useState(null);
   const [previewing, setPreviewing] = useState(false);
 
@@ -56,27 +53,6 @@ export default function Settings() {
     }
   };
 
-  const connectGoogle = async () => {
-    setConnectingGoogle(true);
-    try {
-      const r = await axios.get('/api/oauth/authorize');
-      window.location.href = r.data.url;
-    } catch (e) {
-      addToast(e.response?.data?.error || 'Failed to start Google auth', 'error');
-      setConnectingGoogle(false);
-    }
-  };
-
-  const disconnectGoogle = async () => {
-    try {
-      await axios.post('/api/oauth/disconnect');
-      setGoogleConnected(false);
-      addToast('Google account disconnected', 'info');
-    } catch {
-      addToast('Disconnect failed', 'error');
-    }
-  };
-
   const previewSheet = async () => {
     if (!sheetId.trim()) { addToast('Enter a Sheet ID first', 'warn'); return; }
     setPreviewing(true);
@@ -101,21 +77,13 @@ export default function Settings() {
       <div className="bb-card" style={{ marginBottom: '20px' }}>
         <h2 className="bb-section-title">Google Account</h2>
         <p className="bb-muted" style={{ marginBottom: '16px' }}>
-          Connect your Google account to enable live spend syncing, budget updates, and lead exports.
-          One connection covers all accounts.
+          Connected via service account — no OAuth consent screen needed. The service account
+          authenticates automatically using the credentials configured on the server.
         </p>
-        {googleConnected ? (
-          <div className="bb-row" style={{ gap: '12px', alignItems: 'center' }}>
-            <span className="bb-pill bb-pill-on">● Connected</span>
-            <button className="bb-btn bb-btn-ghost" onClick={disconnectGoogle}>
-              <Link2Off size={15} /> Disconnect
-            </button>
-          </div>
-        ) : (
-          <button className="bb-btn bb-btn-primary" onClick={connectGoogle} disabled={connectingGoogle}>
-            <Link2 size={15} /> {connectingGoogle ? 'Redirecting to Google…' : 'Connect Google Account'}
-          </button>
-        )}
+        <div className="bb-row" style={{ gap: '10px', alignItems: 'center' }}>
+          <ShieldCheck size={16} style={{ color: 'var(--success, #22c55e)' }} />
+          <span className="bb-pill bb-pill-on">● Service Account Connected</span>
+        </div>
       </div>
 
       {/* Google Sheets */}

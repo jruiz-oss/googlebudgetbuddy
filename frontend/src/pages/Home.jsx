@@ -318,7 +318,6 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
               <th>TYPE</th>
               <th className="num">BUDGET</th>
               <th className="num">MTD SPEND</th>
-              <th className="num">PACE</th>
               <th className="num">CURRENT DAILY</th>
               <th className="num">REC. DAILY</th>
               <th className="status-col">STATUS</th>
@@ -382,7 +381,6 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
         <td><span className="mode-badge">SEG</span></td>
         <td className="num mono">{fmt0(seg.monthly)}/mo</td>
         <td className="num mono">{fmt2(seg.spend)}</td>
-        <td className="num mono pace-val">{seg.pace.ratio.toFixed(2)}x</td>
         <td className="num mono">{seg.currentTotal > 0 ? fmt2(seg.currentTotal) : <span className="dim">—</span>}</td>
         <td className="num mono" style={{ fontWeight: 600 }}>{seg.pace.dailyRec > 0 ? fmt2(seg.pace.dailyRec) : <span className="dim">—</span>}</td>
         <td>
@@ -420,7 +418,6 @@ function SegmentRows({ account, seg, segInfo, segActionable, skipped, onApplySeg
             </td>
             <td className="num mono">{fmt0(child.monthly)}/mo</td>
             <td className="num mono">{fmt2(child.spend)}</td>
-            <td className="num mono pace-val">{child.pace.ratio.toFixed(2)}x</td>
             <td className="num mono">
               {isEditing ? (
                 <input

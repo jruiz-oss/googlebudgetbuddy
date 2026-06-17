@@ -15,7 +15,7 @@ from openpyxl.styles import Font
 
 from flask import Blueprint, Response, jsonify, request, session
 
-from database import Account, AccountSettings, GoogleOAuthToken, LeadExport, db
+from database import Account, AccountSettings, LeadExport, db
 from google_ads_client import GoogleAdsError, diagnose_lead_form_setup, get_lead_form_submissions
 from routes.auth import login_required
 
@@ -50,11 +50,6 @@ def pull_leads(account_id):
     if not settings or not settings.track_leads:
         return jsonify({'error': 'Lead tracking is not enabled for this account. Enable it in Settings.'}), 400
 
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'error': 'Google account not connected'}), 401
-
     today = datetime.utcnow().date()
     yesterday = today - timedelta(days=1)
     month_start = today.replace(day=1)
@@ -70,7 +65,6 @@ def pull_leads(account_id):
 
     try:
         leads = get_lead_form_submissions(
-            token.refresh_token,
             account.google_customer_id,
             start_date,
             end_date,
@@ -90,7 +84,6 @@ def pull_leads(account_id):
     if not leads:
         try:
             diag = diagnose_lead_form_setup(
-                token.refresh_token,
                 account.google_customer_id,
                 mcc_customer_id=_effective_mcc_customer_id(account),
             )
@@ -141,11 +134,6 @@ def export_leads_csv(account_id):
     if not settings or not settings.track_leads:
         return jsonify({'error': 'Lead tracking is not enabled for this account.'}), 400
 
-    user_id = session['user_id']
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-    if not token:
-        return jsonify({'error': 'Google account not connected'}), 401
-
     today = datetime.utcnow().date()
     yesterday = today - timedelta(days=1)
     month_start = today.replace(day=1)
@@ -161,7 +149,6 @@ def export_leads_csv(account_id):
 
     try:
         leads = get_lead_form_submissions(
-            token.refresh_token,
             account.google_customer_id,
             start_date,
             end_date,

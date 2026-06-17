@@ -7,7 +7,7 @@ import logging
 from flask import Blueprint, jsonify, request, session
 from sqlalchemy.orm import selectinload
 
-from database import Account, Campaign, GoogleOAuthToken, PacingData, db, visible_latest_campaigns
+from database import Account, Campaign, PacingData, db, visible_latest_campaigns
 from routes.auth import login_required
 
 logger = logging.getLogger(__name__)

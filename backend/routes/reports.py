@@ -24,7 +24,7 @@ import requests
 from flask import Blueprint, jsonify, request, session
 
 from database import (
-    Account, Campaign, GoogleOAuthToken, MonthlyReport, UserSettings,
+    Account, Campaign, MonthlyReport, UserSettings,
     current_month_start, db, visible_latest_campaigns, latest_pacing_date,
     campaign_mtd_spend_total, segment_spend_summaries,
 )
@@ -348,9 +348,6 @@ def generate_report(account_id, year, month):
         .get_or_404(account_id)
     )
 
-    # Get OAuth token for Google Ads API calls
-    token = GoogleOAuthToken.query.filter_by(user_id=user_id, is_valid=True).first()
-
     today = date.today()
     start_date, end_date = _month_date_range(year, month)
     # For the current month, cap end date at yesterday (no complete data for today)
@@ -359,51 +356,48 @@ def generate_report(account_id, year, month):
         end_date = min(end_date, yesterday)
 
     # Pull live spend + search terms from Google Ads (best-effort)
+    from google_ads_client import (
+        get_top_search_terms, get_campaign_spend_for_period,
+        GoogleAdsError,
+    )
+    from database import canonical_campaigns
+
     search_terms = []
     live_spend   = None   # {campaign_id: {spend, clicks, conversions}}
 
-    if token:
-        from google_ads_client import (
-            get_top_search_terms, get_campaign_spend_for_period,
-            GoogleAdsError,
-        )
-        from database import canonical_campaigns
-
-        # Live spend for the full month — this is the source of truth for the
-        # summary, replacing stale pacing_data rows that only reflect run snapshots
-        campaign_ids = [
-            c.google_campaign_id
-            for c in canonical_campaigns(account.campaigns or [])
-            if c.google_campaign_id
-        ]
-        if campaign_ids and start_date <= end_date:
-            try:
-                live_spend = get_campaign_spend_for_period(
-                    token.refresh_token,
-                    account.google_customer_id,
-                    campaign_ids,
-                    start_date,
-                    end_date,
-                    mcc_customer_id=_effective_mcc_customer_id(account),
-                )
-                logger.info(
-                    'generate_report: live spend fetched for account %s '
-                    '(%d campaigns, %s–%s)',
-                    account_id, len(campaign_ids), start_date, end_date,
-                )
-            except Exception as e:
-                logger.warning('Live spend fetch failed for account %s: %s', account_id, e)
-
+    # Live spend for the full month — this is the source of truth for the
+    # summary, replacing stale pacing_data rows that only reflect run snapshots
+    campaign_ids = [
+        c.google_campaign_id
+        for c in canonical_campaigns(account.campaigns or [])
+        if c.google_campaign_id
+    ]
+    if campaign_ids and start_date <= end_date:
         try:
-            search_terms = get_top_search_terms(
-                token.refresh_token,
+            live_spend = get_campaign_spend_for_period(
                 account.google_customer_id,
+                campaign_ids,
                 start_date,
                 end_date,
                 mcc_customer_id=_effective_mcc_customer_id(account),
             )
+            logger.info(
+                'generate_report: live spend fetched for account %s '
+                '(%d campaigns, %s–%s)',
+                account_id, len(campaign_ids), start_date, end_date,
+            )
         except Exception as e:
-            logger.warning('Search terms fetch failed for account %s: %s', account_id, e)
+            logger.warning('Live spend fetch failed for account %s: %s', account_id, e)
+
+    try:
+        search_terms = get_top_search_terms(
+            account.google_customer_id,
+            start_date,
+            end_date,
+            mcc_customer_id=_effective_mcc_customer_id(account),
+        )
+    except Exception as e:
+        logger.warning('Search terms fetch failed for account %s: %s', account_id, e)
 
     # Get existing report for notes
     r = _get_or_create_report(account_id, year, month)

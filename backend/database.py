@@ -291,21 +291,21 @@ class User(db.Model):
     oauth_token = db.relationship('GoogleOAuthToken', backref='user', lazy=True, uselist=False, cascade='all, delete-orphan')
 
     def to_dict(self):
-        has_token = self.oauth_token is not None and self.oauth_token.is_valid
         return {
             'id': self.id,
             'email': self.email,
-            'has_google_token': has_token,
+            # Service account auth — always connected; no per-user token needed.
+            'has_google_token': True,
             'created_at': self.created_at.isoformat(),
         }
 
 
 class GoogleOAuthToken(db.Model):
-    """Stores the Google OAuth refresh token for a user.
+    """Legacy OAuth token table — retained for schema compatibility only.
 
-    One token per user — all accounts under the same user share it.
-    The refresh token is long-lived; access tokens are short-lived (1 hour)
-    and are fetched on demand via google_ads_client.get_access_token().
+    BudgetBuddy now uses service account authentication (GOOGLE_CREDENTIALS_JSON).
+    No new rows are written to this table; existing rows are ignored at runtime.
+    The table is kept to avoid a destructive migration on existing deployments.
     """
     __tablename__ = 'google_oauth_tokens'
 
