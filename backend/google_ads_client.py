@@ -23,6 +23,7 @@ Key responsibilities:
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, date
 
 import requests
@@ -511,9 +512,22 @@ def update_campaign_budget(customer_id: str,
         }]
     }
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    if not resp.ok:
-        raise GoogleAdsError(f'Budget update failed ({resp.status_code}): {resp.text[:500]}')
+    # Retry on CONCURRENT_MODIFICATION with exponential backoff.
+    max_retries = 3
+    for attempt in range(max_retries):
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        if resp.ok:
+            return True
+        body = resp.text
+        if resp.status_code == 400 and 'CONCURRENT_MODIFICATION' in body and attempt < max_retries - 1:
+            wait = 2 ** attempt  # 1s, 2s
+            logger.warning('Budget update CONCURRENT_MODIFICATION, retry %d/%d in %ds', attempt + 1, max_retries, wait)
+            time.sleep(wait)
+            # Refresh access token before retry in case it expired.
+            access_token = get_service_account_access_token()
+            headers = _headers(access_token, cid, developer_token, mcc_customer_id)
+            continue
+        raise GoogleAdsError(f'Budget update failed ({resp.status_code}): {body[:500]}')
 
     return True
 

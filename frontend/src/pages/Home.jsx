@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Plus, CloudDownload, Play, Search, ChevronRight, ChevronDown, ArrowRight, AlertTriangle, Check, Activity } from 'lucide-react';
+import { Plus, CloudDownload, Play, Search, ChevronRight, ChevronDown, ArrowRight, Check, Activity } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 
@@ -602,6 +602,13 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
   const [collapsed, setCollapsed] = useState(new Set());
   const [skipped, setSkipped]     = useState(new Set());
   const [oldestFirst, setOldestFirst] = useState(false);
+  const [paceFilter, setPaceFilter]   = useState(() => localStorage.getItem('paceFilter') || null);
+
+  const setPaceFilterPersist = (val) => {
+    if (val == null) localStorage.removeItem('paceFilter');
+    else localStorage.setItem('paceFilter', val);
+    setPaceFilter(val);
+  };
 
   useEffect(() => {
     if (propAccounts?.length) { setAccounts(propAccounts); setLoading(false); }
@@ -791,6 +798,17 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
         return t?.segments.some(s => s.name.toLowerCase().includes(Q) || s.children.some(c => c.name.toLowerCase().includes(Q)));
       });
     }
+    if (paceFilter) {
+      list = list.filter(a => {
+        const t = tables.get(a.id);
+        if (!t) return false;
+        const d = t.pace.deltaPct;
+        if (paceFilter === 'over')  return d > 5;
+        if (paceFilter === 'under') return d < -5;
+        if (paceFilter === 'ok')    return Math.abs(d) <= 5;
+        return true;
+      });
+    }
     list.sort((x, y) => {
       if (oldestFirst) {
         const xt = x.last_pacing_run_at ? new Date(x.last_pacing_run_at + 'Z').getTime() : 0;
@@ -803,7 +821,7 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
       return ya - xa;
     });
     return list;
-  }, [accounts, tables, q, oldestFirst, skipped]);
+  }, [accounts, tables, q, paceFilter, oldestFirst, skipped]);
 
   return (
     <div className="allcamp">
@@ -832,24 +850,27 @@ export default function Home({ onAccountsChange, onAccountSettingChange, account
         <StatCards accounts={accounts} tables={tables} daysIn={daysIn} daysInMonth={daysInMonth} dayOfMonth={dayOfMonth} attention={totalAttention} />
       )}
 
-      {/* Recommendation banner */}
-      {!loading && totalAttention > 0 && (
-        <div className="rec-banner">
-          <AlertTriangle size={16} className="rec-banner-icon" />
-          <span className="rec-banner-text">
-            <strong>{totalAttention}</strong> recommendation{totalAttention === 1 ? '' : 's'} across <strong>{accountsWithAttention}</strong> account{accountsWithAttention === 1 ? '' : 's'}. Newly-detected pace deviations from the latest run.
-          </span>
-          <button className={`rec-banner-btn ${oldestFirst ? 'active' : ''}`} onClick={() => setOldestFirst(v => !v)}>
-            {oldestFirst ? 'Most actionable first' : 'Review oldest first'}
-          </button>
-        </div>
-      )}
-
-      {/* Search */}
+      {/* Search + Pace Filter */}
       {!loading && accounts.length > 0 && (
-        <div className="ac-search">
-          <Search size={15} style={{ color: 'var(--muted)', flexShrink: 0 }} />
-          <input placeholder="Search accounts, campaigns, or segments…" value={q} onChange={e => setQ(e.target.value)} />
+        <div className="ac-search-row">
+          <div className="ac-search">
+            <Search size={15} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+            <input placeholder="Search accounts, campaigns, or segments…" value={q} onChange={e => setQ(e.target.value)} />
+          </div>
+          <div className="pace-filters">
+            {[
+              { key: null,    label: 'All' },
+              { key: 'over',  label: '↘ Overspend' },
+              { key: 'ok',    label: '✓ On Pace' },
+              { key: 'under', label: '↗ Underspend' },
+            ].map(f => (
+              <button
+                key={String(f.key)}
+                className={`pace-filter-btn${paceFilter === f.key ? ' active' : ''}${f.key === 'over' ? ' btn-over' : f.key === 'under' ? ' btn-under' : f.key === 'ok' ? ' btn-ok' : ''}`}
+                onClick={() => setPaceFilterPersist(f.key)}
+              >{f.label}</button>
+            ))}
+          </div>
         </div>
       )}
 

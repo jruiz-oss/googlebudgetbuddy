@@ -1581,6 +1581,13 @@ html, body {
 .rec-banner-btn:hover { background: var(--bg-2); }
 .rec-banner-btn.active { background: var(--ink); color: #fff; border-color: var(--ink); }
 
+/* ── Search + filter row ── */
+.ac-search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
 /* ── Big search ── */
 .ac-search {
   display: flex;
@@ -1590,7 +1597,7 @@ html, body {
   background: var(--surface);
   border: 1px solid var(--line-2);
   border-radius: var(--r);
-  margin-bottom: 18px;
+  flex: 1;
   box-shadow: var(--shadow-sm);
 }
 .ac-search input {
@@ -1603,6 +1610,31 @@ html, body {
   color: var(--ink);
 }
 .ac-search input::placeholder { color: var(--muted); }
+
+/* ── Pace filter buttons ── */
+.pace-filters {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.pace-filter-btn {
+  padding: 7px 13px;
+  border-radius: var(--r);
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+.pace-filter-btn:hover { background: var(--bg-2); color: var(--ink); }
+.pace-filter-btn.active { border-color: var(--ink); color: var(--ink); background: var(--bg-2); font-weight: 600; }
+.pace-filter-btn.btn-over.active  { border-color: var(--red);   color: var(--red);   background: color-mix(in srgb, var(--red) 8%, transparent); }
+.pace-filter-btn.btn-under.active { border-color: #0891b2;      color: #0891b2;      background: color-mix(in srgb, #0891b2 8%, transparent); }
+.pace-filter-btn.btn-ok.active    { border-color: var(--green);  color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
 
 /* ── Account groups ── */
 .acct-groups { display: flex; flex-direction: column; gap: 16px; }
