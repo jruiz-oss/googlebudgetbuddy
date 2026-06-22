@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext, useContext } from 'react';
+import { useState, useEffect, useMemo, createContext, useContext } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { ToastProvider } from './components/Toast';
@@ -8,7 +8,7 @@ import AccountDashboard from './pages/AccountDashboard';
 import CampaignDetail from './pages/CampaignDetail';
 import AccountSettings from './pages/Settings';
 import GlobalSettings from './pages/GlobalSettings';
-import Notifications from './pages/Notifications';
+import Notifications, { buildNotifications } from './pages/Notifications';
 import History from './pages/History';
 import Leads from './pages/Leads';
 import Login from './pages/Login';
@@ -97,10 +97,10 @@ function Topbar({ accounts }) {
 }
 
 // ── Layout wrapper ─────────────────────────────────────────────────────────
-function AppLayout({ children, accounts }) {
+function AppLayout({ children, accounts, unreadCount = 0 }) {
   return (
     <div className="shell">
-      <Sidebar accounts={accounts} unreadCount={3} />
+      <Sidebar accounts={accounts} unreadCount={unreadCount} />
       <div className="main-col">
         <Topbar accounts={accounts} />
         <div className="page-content">{children}</div>
@@ -112,6 +112,7 @@ function AppLayout({ children, accounts }) {
 // ── Inner routes (need ToastProvider in scope) ─────────────────────────────
 function AppRoutes() {
   const [accounts, setAccounts] = useState([]);
+  const [readSet, setReadSet] = useState(new Set());
 
   const loadAccounts = async () => {
     try {
@@ -132,8 +133,13 @@ function AppRoutes() {
 
   useEffect(() => { loadAccounts(); }, []);
 
+  const unreadCount = useMemo(
+    () => buildNotifications(accounts).filter(n => n.unread && !readSet.has(n.id)).length,
+    [accounts, readSet]
+  );
+
   const wrap = (el) => (
-    <AppLayout accounts={accounts}>
+    <AppLayout accounts={accounts} unreadCount={unreadCount}>
       {el}
     </AppLayout>
   );
@@ -148,7 +154,7 @@ function AppRoutes() {
       } />
 
       <Route path="/notifications" element={
-        <ProtectedRoute>{wrap(<Notifications accounts={accounts} />)}</ProtectedRoute>
+        <ProtectedRoute>{wrap(<Notifications accounts={accounts} readSet={readSet} onReadSetChange={setReadSet} />)}</ProtectedRoute>
       } />
 
       <Route path="/settings" element={

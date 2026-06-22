@@ -7,7 +7,7 @@ function campaignKey(c) {
 }
 
 // Generate notifications from real account pacing data
-function buildNotifications(accounts) {
+export function buildNotifications(accounts) {
   const today = new Date();
   // Spend data from Google Ads is through EOD of the prior day.
   const daysIn = Math.max(today.getDate() - 1, 1);
@@ -102,9 +102,13 @@ function buildNotifications(accounts) {
 
 const ICON = { over: '!', under: '↓', info: 'i', ok: '✓' };
 
-export default function Notifications({ accounts = [] }) {
+export default function Notifications({ accounts = [], readSet: readSetProp, onReadSetChange }) {
   const [filter, setFilter] = useState('all');
-  const [readSet, setReadSet] = useState(new Set());
+  const [readSetLocal, setReadSetLocal] = useState(new Set());
+
+  // Use lifted state if provided, otherwise fall back to local state
+  const readSet = readSetProp ?? readSetLocal;
+  const setReadSet = onReadSetChange ?? setReadSetLocal;
 
   const allNoti = useMemo(() => buildNotifications(accounts), [accounts]);
 
@@ -162,7 +166,7 @@ export default function Notifications({ accounts = [] }) {
             <div
               key={n.id}
               className={`noti-item ${isUnread ? 'unread' : ''}`}
-              onClick={() => setReadSet(s => new Set([...s, n.id]))}
+              onClick={() => setReadSet(new Set([...readSet, n.id]))}
             >
               <div className={`nicon ${n.kind}`}>{ICON[n.kind]}</div>
               <div className="nbody">

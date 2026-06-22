@@ -7,9 +7,10 @@ import Logo from './Logo';
 
 function accountPaceStatus(account) {
   const s = account.pacing_status;
-  if (s === 'over_pacing')  return 'over';
-  if (s === 'under_pacing') return 'under';
-  if (s === 'on_track')     return 'ok';
+  if (!s || typeof s !== 'object') return 'none';
+  if (s.over_pacing > 0)  return 'over';
+  if (s.under_pacing > 0) return 'under';
+  if (s.on_track > 0)     return 'ok';
   return 'none';
 }
 
