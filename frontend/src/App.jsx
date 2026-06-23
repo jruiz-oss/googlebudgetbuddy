@@ -112,7 +112,22 @@ function AppLayout({ children, accounts, unreadCount = 0 }) {
 // ── Inner routes (need ToastProvider in scope) ─────────────────────────────
 function AppRoutes() {
   const [accounts, setAccounts] = useState([]);
-  const [readSet, setReadSet] = useState(new Set());
+  // Persist which notifications have been read so they stay cleared across
+  // refreshes (otherwise the nav badge count comes back on every reload).
+  const [readSet, setReadSet] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('bb_noti_read') || '[]');
+      return new Set(Array.isArray(saved) ? saved : []);
+    } catch {
+      return new Set();
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('bb_noti_read', JSON.stringify([...readSet]));
+    } catch { /* ignore quota/serialization errors */ }
+  }, [readSet]);
 
   const loadAccounts = async () => {
     try {
