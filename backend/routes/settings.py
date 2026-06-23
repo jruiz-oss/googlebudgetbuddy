@@ -53,6 +53,8 @@ def update_settings(account_id):
         if not (50.0 <= val <= 100.0):
             return jsonify({'error': 'auto_pause_threshold must be between 50 and 100'}), 400
         s.auto_pause_threshold = val
+    if 'lockdown_enabled' in data:
+        s.lockdown_enabled = bool(data['lockdown_enabled'])
     if 'google_sheet_id' in data:
         raw_sheet_id = (data['google_sheet_id'] or '').strip()
         s.google_sheet_id = _sheet_id_from_url_or_id(raw_sheet_id) if raw_sheet_id else None

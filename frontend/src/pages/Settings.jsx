@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { ShieldCheck, Save } from 'lucide-react';
+import { ShieldCheck, Save, Lock } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from '../components/Toast';
 
@@ -13,6 +13,7 @@ export default function Settings() {
   const [sheetId, setSheetId] = useState('');
   const [autoPause, setAutoPause] = useState(false);
   const [autoPauseThreshold, setAutoPauseThreshold] = useState(95);
+  const [lockdown, setLockdown] = useState(false);
   const [digestEnabled, setDigestEnabled] = useState(false);
   const [trackLeads, setTrackLeads] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -30,6 +31,7 @@ export default function Settings() {
       setSheetId(s.google_sheet_id || '');
       setAutoPause(s.auto_pause_enabled);
       setAutoPauseThreshold(s.auto_pause_threshold);
+      setLockdown(s.lockdown_enabled);
       setDigestEnabled(s.daily_digest_enabled);
       setTrackLeads(s.track_leads);
     }).catch(() => addToast('Failed to load settings', 'error'));
@@ -42,6 +44,7 @@ export default function Settings() {
         google_sheet_id: sheetId.trim() || null,
         auto_pause_enabled: autoPause,
         auto_pause_threshold: autoPauseThreshold,
+        lockdown_enabled: lockdown,
         daily_digest_enabled: digestEnabled,
         track_leads: trackLeads,
       });
@@ -130,6 +133,23 @@ export default function Settings() {
             )}
           </div>
         )}
+      </div>
+
+      {/* Lockdown — must stay OFF */}
+      <div className="bb-card" style={{ marginBottom: '20px', borderColor: lockdown ? 'var(--danger, #dc2626)' : undefined }}>
+        <h2 className="bb-section-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Lock size={16} /> Lockdown — Must Stay OFF
+        </h2>
+        <p className="bb-muted" style={{ marginBottom: '16px' }}>
+          For accounts that must never spend. When enabled, the hourly check pauses
+          <strong> every campaign</strong> the moment any month-to-date spend above $0 is detected.
+          This overrides the Grant exemption and runs even if auto-pause is off.
+          Locked accounts also always show their campaigns below regardless of spend.
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+          <input type="checkbox" checked={lockdown} onChange={e => setLockdown(e.target.checked)} />
+          <span className="bb-form-label" style={{ margin: 0 }}>Lock this account — pause everything on any spend</span>
+        </label>
       </div>
 
       {/* Auto-Pause */}

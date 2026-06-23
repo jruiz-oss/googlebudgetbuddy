@@ -113,6 +113,8 @@ def _run_lightweight_migrations():
          'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_end_date DATE'),
         ('campaigns.google_status',
          "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_status VARCHAR(50)"),
+        ('account_settings.lockdown_enabled',
+         'ALTER TABLE account_settings ADD COLUMN IF NOT EXISTS lockdown_enabled BOOLEAN DEFAULT FALSE'),
         ('user_settings table',
          """CREATE TABLE IF NOT EXISTS user_settings (
              id SERIAL PRIMARY KEY,
@@ -302,7 +304,7 @@ def _hourly_auto_pause_job(app):
     from sqlalchemy.orm import selectinload
 
     with app.app_context():
-        from database import Account, Campaign, PauseEvent
+        from database import Account, Campaign, PauseEvent, canonical_campaigns
         from routes.pacing import _execute_pacing_run, _effective_mcc_customer_id
         from google_ads_client import pause_campaigns, GoogleAdsError
 
@@ -324,7 +326,78 @@ def _hourly_auto_pause_job(app):
                     continue
 
                 settings = account.settings
-                if not settings or not settings.auto_pause_enabled:
+                if not settings:
+                    continue
+
+                # ── Lockdown / "must stay OFF" ──────────────────────────────
+                # A locked account is supposed to spend $0. This overrides BOTH
+                # the Grant bypass (rule B) and auto_pause_enabled: if even a
+                # penny of MTD spend shows up, pause every campaign immediately.
+                if getattr(settings, 'lockdown_enabled', False):
+                    try:
+                        lk = _execute_pacing_run(
+                            account, today, log_prefix='lockdown',
+                        )
+                        # _execute_pacing_run may rewrite today's PacingData;
+                        # commit so that work isn't rolled back.
+                        db.session.commit()
+                    except Exception as e:
+                        db.session.rollback()
+                        logger.error('Lockdown check failed for account %s: %s', account_id, e)
+                        continue
+
+                    if not lk['ok'] or lk['no_campaigns']:
+                        continue
+
+                    metrics = lk.get('metrics_by_id') or {}
+                    total_spend = sum(
+                        (m or {}).get('spend', 0) or 0 for m in metrics.values()
+                    )
+                    if total_spend <= 0:
+                        # Still off — nothing to do.
+                        continue
+
+                    # Pause anything and everything currently ENABLED. is_active
+                    # was just refreshed from the live API inside the run.
+                    to_pause = [c for c in canonical_campaigns(account.campaigns) if c.is_active]
+                    campaign_ids = [c.google_campaign_id for c in to_pause]
+                    if not campaign_ids:
+                        # Spent earlier this month but already all paused — log
+                        # the event once so it shows in pause history, no API call.
+                        logger.warning(
+                            'LOCKDOWN: account_id=%s name=%r spent %.2f but no active '
+                            'campaigns remain to pause.',
+                            account.id, account.account_name, total_spend,
+                        )
+                        continue
+
+                    logger.warning(
+                        'LOCKDOWN TRIGGERED: account_id=%s name=%r spent %.2f while marked '
+                        'must-stay-off — pausing %d campaign(s).',
+                        account.id, account.account_name, total_spend, len(campaign_ids),
+                    )
+                    try:
+                        pause_campaigns(
+                            account.google_customer_id,
+                            campaign_ids,
+                            mcc_customer_id=_effective_mcc_customer_id(account),
+                        )
+                    except GoogleAdsError as e:
+                        logger.error('Lockdown pause failed for account %s: %s', account.id, e)
+                        continue
+
+                    db.session.add(PauseEvent(
+                        account_id=account.id,
+                        spend_at_pause=round(total_spend, 2),
+                        budget_at_pause=0.0,
+                        threshold_pct=0.0,
+                        paused_campaign_names=_json.dumps([c.campaign_name for c in to_pause]),
+                        triggered_by='LOCKDOWN',
+                    ))
+                    db.session.commit()
+                    continue
+
+                if not settings.auto_pause_enabled:
                     continue
 
                 # Business rule B: Grant accounts are exempt from auto-pause.

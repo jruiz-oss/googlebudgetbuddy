@@ -176,6 +176,20 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-06-23 — Account lockdown ("must stay OFF") kill-switch
+**What:** New per-account `lockdown_enabled` flag for accounts that are supposed to spend $0. When locked, the hourly job pauses **every** campaign the moment any MTD spend > $0 is detected. Locked accounts also always show all their campaigns on the dashboard (regardless of spend) so the user can confirm everything is off.
+**Behavior:**
+- Trigger = any MTD spend > $0 (one penny). When triggered, pauses every currently-ENABLED campaign in the account and writes a `PauseEvent(triggered_by='LOCKDOWN')`.
+- **Overrides** the Grant bypass (rule B) AND `auto_pause_enabled` — a locked account is enforced even if auto-pause is off. The lockdown branch runs before both guards in the hourly job.
+- Enforced by the existing hourly auto-pause job (`:30` past each hour) — max ~1hr exposure. The daily/2-hourly pacing run is unchanged (no pause there).
+**Changes:**
+- `backend/database.py`: `AccountSettings.lockdown_enabled` (Boolean, default False) + in `to_dict()`. `visible_latest_campaigns()` gained a `show_all` param that bypasses the spend gate; `Account.to_dict()` passes `show_all=settings.lockdown_enabled`.
+- `backend/routes/settings.py`: PUT accepts `lockdown_enabled`.
+- `backend/app.py`: `_hourly_auto_pause_job` lockdown branch (before grant/auto_pause guards); imports `canonical_campaigns`. Startup migration `ALTER TABLE account_settings ADD COLUMN IF NOT EXISTS lockdown_enabled BOOLEAN DEFAULT FALSE`.
+- `frontend/src/pages/Settings.jsx`: "Lockdown — Must Stay OFF" toggle card.
+- `frontend/src/pages/Home.jsx`: 🔒 LOCKED badge on locked account headers.
+**Watch:** Lockdown sums spend across ALL canonical campaigns' metrics (incl. paused-but-spent), not just the active set, so a campaign that spent earlier in the month and was already paused still triggers the event.
+
 ### 2026-06-09 — "Copy for Sheets" button on Leads page
 **What:** One-click copy of pulled leads as TSV to the clipboard — pasting into Google Sheets splits into columns. Same dynamic columns as the Excel export (base + extra standard fields + custom questions). Frontend-only (`frontend/src/pages/Leads.jsx`, `copyForSheets()`); tabs/newlines inside answers are flattened to spaces so they can't break rows.
 

@@ -300,7 +300,19 @@ function AccountGroup({ account, table, index, collapsed, onToggle, skipped, onS
       <div className="acct-group-head" onClick={() => navigate(`/accounts/${account.id}`)}>
         <span className="acct-bar" style={{ background: accentColor }} />
         <div className="acct-head-id">
-          <div className="acct-name">{account.account_name}</div>
+          <div className="acct-name">
+            {account.account_name}
+            {account.settings?.lockdown_enabled && (
+              <span
+                title="Lockdown — must stay off. Any spend pauses everything."
+                style={{
+                  marginLeft: 8, fontSize: 10, fontWeight: 700, letterSpacing: '0.04em',
+                  padding: '2px 7px', borderRadius: 5, verticalAlign: 'middle',
+                  color: '#fff', background: 'var(--danger, #dc2626)',
+                }}
+              >🔒 LOCKED</span>
+            )}
+          </div>
           <div className="acct-meta">
             Last run: <strong>{timeAgo(account.last_pacing_run_at) || 'never'}</strong>
             {table.hidden > 0 && <> · {table.hidden} hidden</>}

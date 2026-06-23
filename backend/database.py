@@ -126,8 +126,14 @@ def dedupe_by_name(campaigns):
     return [max(twins, key=_freshness_score) for twins in by_name.values()]
 
 
-def visible_latest_campaigns(campaigns, month_start=None):
+def visible_latest_campaigns(campaigns, month_start=None, show_all=False):
     """Campaigns visible to dashboards. Mirrors the pacing-run inclusion rule.
+
+    When ``show_all`` is True (lockdown / "must stay OFF" accounts), the
+    spend-based filter is bypassed and every canonical campaign is returned with
+    its real status. This lets the user confirm a locked account is genuinely
+    off even when nothing has spent this month — campaigns with $0 spend would
+    otherwise be hidden by the normal rule below.
 
     The rule (matches what the user wants on the per-account dashboard):
       INCLUDE if:
@@ -149,6 +155,9 @@ def visible_latest_campaigns(campaigns, month_start=None):
     if month_start is None:
         month_start = current_month_start()
     canonical = canonical_campaigns(campaigns)
+    if show_all:
+        # Lockdown view: show everything (deduped by name), no spend gate.
+        return dedupe_by_name(canonical)
     # Only consider pacing rows from the current month. At the start of a new
     # month (before its first run) this is None, so campaigns that merely spent
     # *last* month are no longer treated as "spending now".
@@ -363,7 +372,10 @@ class Account(db.Model):
         # row per Google campaign ID. Older duplicate rows are retained for
         # history but never participate in live totals.
         month_start = current_month_start()
-        visible_campaigns = visible_latest_campaigns(self.campaigns, month_start=month_start)
+        # Locked ("must stay off") accounts show all campaigns regardless of
+        # spend so the user can verify everything is genuinely paused.
+        show_all = bool(self.settings and getattr(self.settings, 'lockdown_enabled', False))
+        visible_campaigns = visible_latest_campaigns(self.campaigns, month_start=month_start, show_all=show_all)
         total_monthly_budget = segment_budget_total(visible_campaigns)
         latest_date = latest_pacing_date(visible_campaigns, month_start=month_start)
         total_mtd_spend = campaign_mtd_spend_total(visible_campaigns, latest_date, month_start=month_start)
@@ -696,6 +708,13 @@ class AccountSettings(db.Model):
     # Auto-pause: pause all campaigns when MTD spend hits this % of monthly budget
     auto_pause_enabled = db.Column(db.Boolean, default=False)
     auto_pause_threshold = db.Column(db.Float, default=95.0)  # percent, e.g. 95.0 = 95%
+    # Lockdown / "must stay OFF": this account is supposed to spend $0. When True,
+    # the hourly job pauses EVERY campaign the moment any MTD spend > $0 is seen.
+    # This overrides both the Grant bypass (rule B) and auto_pause_enabled — a
+    # locked account is never allowed to spend a penny. Locked accounts also show
+    # all their campaigns on the dashboard (regardless of spend) so the user can
+    # confirm at a glance that everything is genuinely off.
+    lockdown_enabled = db.Column(db.Boolean, default=False, nullable=False)
     # Google Sheets integration
     google_sheet_id = db.Column(db.String(500), nullable=True)
     # Daily digest email after each scheduled pacing run
@@ -710,6 +729,7 @@ class AccountSettings(db.Model):
             'account_id': self.account_id,
             'auto_pause_enabled': bool(self.auto_pause_enabled),
             'auto_pause_threshold': self.auto_pause_threshold,
+            'lockdown_enabled': bool(self.lockdown_enabled),
             'google_sheet_id': self.google_sheet_id or '',
             'daily_digest_enabled': bool(self.daily_digest_enabled),
             'track_leads': bool(self.track_leads),
