@@ -182,7 +182,7 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 - `backend/database.py`: `AccountSettings.auto_pause_threshold` default `95.0 → 104.0`.
 - `backend/app.py`: Startup migration bumps existing rows still at the old 95% default (`UPDATE account_settings SET auto_pause_threshold = 104.0 WHERE auto_pause_threshold = 95.0`). Intentionally-customized thresholds are left untouched. Note: this UPDATE re-runs on every boot, so a value of exactly 95.0 can't be re-set via the UI without being bumped again.
 - Behavior unchanged otherwise: pause fires when `MTD spend / monthly budget * 100 >= threshold`. No time-of-month awareness.
-**Requires:** `auto_pause_enabled = True` per account for the backstop to fire — it is off by default. Grant accounts remain exempt (rule B); lockdown overrides everything.
+**Auto-pause now ON by default:** `AccountSettings.auto_pause_enabled` default `False → True`, so the backstop is active on new accounts. A new `migration_flags` table guards a **one-time** backfill (`enable_auto_pause_default_2026_06_30`) that flips all existing accounts to enabled exactly once — so a user can still turn an account OFF afterward without it flipping back on every boot. Grant accounts remain exempt (rule B); lockdown overrides everything.
 **Email note:** No pause email was added — the MCC script's 100% pause already sends the alert.
 
 ### 2026-06-23 — Account lockdown ("must stay OFF") kill-switch

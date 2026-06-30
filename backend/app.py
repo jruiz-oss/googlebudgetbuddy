@@ -142,12 +142,43 @@ def _run_lightweight_migrations():
              updated_at TIMESTAMP DEFAULT NOW(),
              UNIQUE(account_id, year, month)
          )"""),
+        # Marker table for one-time data backfills (so they don't re-run every boot).
+        ('migration_flags table',
+         """CREATE TABLE IF NOT EXISTS migration_flags (
+             key VARCHAR(100) PRIMARY KEY,
+             applied_at TIMESTAMP DEFAULT NOW()
+         )"""),
     ]
 
     with db.engine.begin() as conn:
         for label, statement in statements:
             conn.execute(sqlalchemy.text(statement))
             logger.info('Migration checked: %s', label)
+
+    # ── One-time data backfills (guarded by migration_flags) ────────────────────
+    # These change existing rows, so they must run exactly once — otherwise they'd
+    # undo any later user edit on every reboot. Each is gated on a marker key.
+    one_time = [
+        # Turn auto-pause ON for all existing accounts (new default). Runs once so a
+        # user can still turn an account OFF afterward without it flipping back on.
+        ('enable_auto_pause_default_2026_06_30',
+         'UPDATE account_settings SET auto_pause_enabled = TRUE WHERE auto_pause_enabled = FALSE'),
+    ]
+    with db.engine.begin() as conn:
+        for key, statement in one_time:
+            already = conn.execute(
+                sqlalchemy.text('SELECT 1 FROM migration_flags WHERE key = :k'),
+                {'k': key},
+            ).first()
+            if already:
+                logger.info('One-time migration already applied: %s', key)
+                continue
+            conn.execute(sqlalchemy.text(statement))
+            conn.execute(
+                sqlalchemy.text('INSERT INTO migration_flags (key) VALUES (:k)'),
+                {'k': key},
+            )
+            logger.info('One-time migration applied: %s', key)
 
 
 def create_app():
