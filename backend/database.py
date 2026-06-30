@@ -707,7 +707,7 @@ class AccountSettings(db.Model):
     account_id = db.Column(db.Integer, db.ForeignKey('accounts.id'), nullable=False, unique=True)
     # Auto-pause: pause all campaigns when MTD spend hits this % of monthly budget
     auto_pause_enabled = db.Column(db.Boolean, default=False)
-    auto_pause_threshold = db.Column(db.Float, default=100.0)  # percent — pause only at/over the full budget cap
+    auto_pause_threshold = db.Column(db.Float, default=104.0)  # percent — backstop; script pauses at 100%, app only if spend slips past 104%
     # Lockdown / "must stay OFF": this account is supposed to spend $0. When True,
     # the hourly job pauses EVERY campaign the moment any MTD spend > $0 is seen.
     # This overrides both the Grant bypass (rule B) and auto_pause_enabled — a

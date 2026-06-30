@@ -176,13 +176,14 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
-### 2026-06-30 — Auto-pause default raised to 100% (only pause at the budget cap)
-**What:** Auto-pause now defaults to pausing only at the full budget cap (100%) instead of 95%, so campaigns stop being paused while still under budget.
+### 2026-06-30 — Auto-pause is now a 104% backstop (was 95%)
+**What:** The app's auto-pause is intended as a safety net behind the Google Ads MCC script. The script pauses at 100% and sends the email; BudgetBuddy only pauses if spend slips past **104%** (i.e. the script missed it).
 **Changes:**
-- `backend/database.py`: `AccountSettings.auto_pause_threshold` default `95.0 → 100.0`.
-- `backend/app.py`: Startup migration bumps existing rows still at the old default (`UPDATE account_settings SET auto_pause_threshold = 100.0 WHERE auto_pause_threshold = 95.0`). Intentionally-customized thresholds are left untouched. Note: this UPDATE re-runs on every boot, so a value of exactly 95.0 can't be re-set via the UI without being bumped again.
-- Behavior unchanged otherwise: pause fires when `MTD spend / monthly budget * 100 >= threshold`. The check has no time-of-month awareness — at 100% it pauses once the whole month's budget is spent regardless of the date.
-**Email note:** No pause email was added here — the Google Ads MCC script that pauses at 100% already sends the alert.
+- `backend/database.py`: `AccountSettings.auto_pause_threshold` default `95.0 → 104.0`.
+- `backend/app.py`: Startup migration bumps existing rows still at the old 95% default (`UPDATE account_settings SET auto_pause_threshold = 104.0 WHERE auto_pause_threshold = 95.0`). Intentionally-customized thresholds are left untouched. Note: this UPDATE re-runs on every boot, so a value of exactly 95.0 can't be re-set via the UI without being bumped again.
+- Behavior unchanged otherwise: pause fires when `MTD spend / monthly budget * 100 >= threshold`. No time-of-month awareness.
+**Requires:** `auto_pause_enabled = True` per account for the backstop to fire — it is off by default. Grant accounts remain exempt (rule B); lockdown overrides everything.
+**Email note:** No pause email was added — the MCC script's 100% pause already sends the alert.
 
 ### 2026-06-23 — Account lockdown ("must stay OFF") kill-switch
 **What:** New per-account `lockdown_enabled` flag for accounts that are supposed to spend $0. When locked, the hourly job pauses **every** campaign the moment any MTD spend > $0 is detected. Locked accounts also always show all their campaigns on the dashboard (regardless of spend) so the user can confirm everything is off.
