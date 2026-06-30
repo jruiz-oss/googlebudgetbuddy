@@ -115,6 +115,11 @@ def _run_lightweight_migrations():
          "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS google_status VARCHAR(50)"),
         ('account_settings.lockdown_enabled',
          'ALTER TABLE account_settings ADD COLUMN IF NOT EXISTS lockdown_enabled BOOLEAN DEFAULT FALSE'),
+        # Bump existing accounts off the old 95% default so they only pause at the
+        # full budget cap (100%). Only touches rows still at the old default value;
+        # any intentionally-customized threshold is left alone.
+        ('account_settings.auto_pause_threshold → 100',
+         'UPDATE account_settings SET auto_pause_threshold = 100.0 WHERE auto_pause_threshold = 95.0'),
         ('user_settings table',
          """CREATE TABLE IF NOT EXISTS user_settings (
              id SERIAL PRIMARY KEY,
