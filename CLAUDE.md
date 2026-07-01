@@ -176,6 +176,16 @@ On fresh deployments these are created automatically by `db.create_all()`. On Po
 
 ## Change log
 
+### 2026-07-01 — Security hardening: login rate limiting + fail-closed secrets
+**What:** Closed the brute-force and "unset env var = wide open" gaps found in a security review.
+**Changes:**
+- `backend/routes/auth.py`: Added flask-limiter (in-memory, per-IP): `/login` 10/min + 100/hr, `/register` 5/min + 20/hr. Limits are per-gunicorn-worker, so effective caps are ~2x with `--workers 2`. Failed logins are now logged with IP. Registration in production now **requires** `INVITE_CODE` to be set — if unset, registration is disabled (403) instead of open.
+- `backend/app.py`: `SECRET_KEY` no longer falls back to `'dev-secret-change-me'` in production — app refuses to boot (RuntimeError) if unset, since a known secret allows forging session cookies. Added `ProxyFix` (1 hop) so `request.remote_addr` is the real client IP behind Railway's proxy (required for rate limiting). `SESSION_COOKIE_SECURE` now keys on `_is_production()` (FLASK_ENV **or** postgres DATABASE_URL) instead of FLASK_ENV alone; `SESSION_COOKIE_HTTPONLY` set explicitly. `/api/cron/run-all-accounts` is fail-closed: unset `CRON_SECRET` now rejects everything (was: open), comparison uses `hmac.compare_digest`.
+- `backend/routes/webhook.py`: `/api/webhook/google-ads` is fail-closed: unset `WEBHOOK_API_KEY` now rejects everything (was: open — and this endpoint can create accounts and write pacing data). Key comparison uses `hmac.compare_digest` (timing-safe).
+- `backend/requirements.txt`: Added `flask-limiter==3.8.0`.
+**Deploy checklist:** Confirm `SECRET_KEY`, `INVITE_CODE`, `WEBHOOK_API_KEY`, and (if the external cron endpoint is used) `CRON_SECRET` are all set on Railway **before** deploying — the app now fails hard/closed on each of these instead of silently degrading.
+**Known remaining (deliberately not changed):** No per-user account ownership checks — any logged-in user can access all accounts (intentional single-tenant agency design; invite gate is the perimeter). Anthropic API key stored plaintext in `user_settings` (masked in API responses). No CSRF tokens (SameSite=None relies on CORS + JSON preflight).
+
 ### 2026-06-30 — Auto-pause is now a 104% backstop (was 95%)
 **What:** The app's auto-pause is intended as a safety net behind the Google Ads MCC script. The script pauses at 100% and sends the email; BudgetBuddy only pauses if spend slips past **104%** (i.e. the script missed it).
 **Changes:**

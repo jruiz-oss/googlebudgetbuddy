@@ -6,8 +6,7 @@ every time it runs — once per account-segment pair, every hour. This endpoint
 replaces the old Supabase edge function.
 
 Authentication: x-api-key header must match the WEBHOOK_API_KEY env var.
-If WEBHOOK_API_KEY is not set the endpoint is open (dev only — always set it
-in production).
+Fail-closed: if WEBHOOK_API_KEY is not set, every request is rejected (401).
 
 Payload shape (from the script):
   unique_id          — "account_id_segment_label" composite key
@@ -25,6 +24,7 @@ Payload shape (from the script):
   campaign_breakdown — [{name, status, spend, daily_budget}, ...]
 """
 
+import hmac
 import json
 import logging
 import os
@@ -87,10 +87,16 @@ def _compute_pacing_status(actual_spend, monthly_budget, today):
 def receive_google_ads():
     """Receive data from the MCC script and upsert it into BudgetBuddy."""
 
-    # 1. Authenticate
+    # 1. Authenticate — fail-closed. This endpoint can create accounts and
+    # write pacing data, so an unset WEBHOOK_API_KEY must reject everything
+    # (previously an unset key left it wide open). compare_digest avoids
+    # leaking the key via response-timing differences.
     expected_key = os.environ.get('WEBHOOK_API_KEY', '')
     incoming_key = request.headers.get('x-api-key', '')
-    if expected_key and incoming_key != expected_key:
+    if not expected_key:
+        logger.error('Webhook: WEBHOOK_API_KEY env var is not set — rejecting request')
+        return jsonify({'error': 'Unauthorized'}), 401
+    if not hmac.compare_digest(incoming_key, expected_key):
         logger.warning('Webhook: rejected request with bad API key')
         return jsonify({'error': 'Unauthorized'}), 401
 

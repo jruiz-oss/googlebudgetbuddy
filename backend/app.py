@@ -31,6 +31,7 @@ Optional:
   SKIP_CREATE_ALL        — set to 'true' to skip db.create_all() on boot
 """
 
+import hmac
 import logging
 import os
 import atexit
@@ -181,11 +182,34 @@ def _run_lightweight_migrations():
             logger.info('One-time migration applied: %s', key)
 
 
+def _is_production():
+    return (
+        os.environ.get('FLASK_ENV') == 'production'
+        or 'postgresql' in os.environ.get('DATABASE_URL', '')
+    )
+
+
 def create_app():
     app = Flask(__name__)
 
+    # Railway/Vercel sit behind a reverse proxy: trust one hop of
+    # X-Forwarded-For / X-Forwarded-Proto so request.remote_addr is the real
+    # client IP (required for per-IP login rate limiting) and https is detected.
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
     # ── Configuration ─────────────────────────────────────────────────────────
-    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-change-me')
+    # SECRET_KEY signs the session cookie. A known fallback value would let
+    # anyone forge a logged-in session, so production fails hard if it's unset.
+    secret_key = os.environ.get('SECRET_KEY', '')
+    if not secret_key:
+        if _is_production():
+            raise RuntimeError(
+                'SECRET_KEY env var is not set. Refusing to start in production '
+                'with a forgeable session secret.'
+            )
+        secret_key = 'dev-secret-change-me'  # local dev only
+    app.config['SECRET_KEY'] = secret_key
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///dev.db')
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
         'pool_pre_ping': True,
@@ -198,7 +222,11 @@ def create_app():
     from datetime import timedelta
     app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
     app.config['SESSION_COOKIE_SAMESITE'] = 'None'
-    app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'
+    # Secure must be on whenever SameSite=None or Chrome rejects the cookie.
+    # Keyed on _is_production() (FLASK_ENV or a postgres DATABASE_URL) instead
+    # of FLASK_ENV alone so a missing FLASK_ENV can't silently downgrade it.
+    app.config['SESSION_COOKIE_SECURE'] = _is_production()
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins_raw = os.environ.get('CORS_ORIGINS', 'http://localhost:3000')
@@ -209,7 +237,8 @@ def create_app():
     db.init_app(app)
 
     # ── Blueprints ────────────────────────────────────────────────────────────
-    from routes.auth import auth_bp
+    from routes.auth import auth_bp, limiter
+    limiter.init_app(app)  # per-IP rate limits on /login and /register
     from routes.oauth import oauth_bp
     from routes.accounts import accounts_bp
     from routes.campaigns import campaigns_bp
@@ -525,9 +554,18 @@ app = create_app()
 
 @app.route('/api/cron/run-all-accounts', methods=['POST'])
 def cron_run_all():
-    """External cron trigger. Protected by X-Cron-Secret header."""
+    """External cron trigger. Protected by X-Cron-Secret header.
+
+    Fail-closed: if CRON_SECRET is not configured the endpoint always 401s
+    (previously an unset secret left it wide open). The internal APScheduler
+    jobs are unaffected — this route is only for external cron services.
+    """
     secret = os.environ.get('CRON_SECRET', '')
-    if secret and request.headers.get('X-Cron-Secret') != secret:
+    incoming = request.headers.get('X-Cron-Secret', '')
+    if not secret:
+        logger.error('Cron endpoint called but CRON_SECRET env var is not set — rejecting')
+        return jsonify({'error': 'Unauthorized'}), 401
+    if not hmac.compare_digest(incoming, secret):
         return jsonify({'error': 'Unauthorized'}), 401
     _scheduled_pacing_job(app)
     return jsonify({'message': 'Pacing job completed'})
